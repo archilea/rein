@@ -117,7 +117,9 @@ For a longer walkthrough with a virtual-key example and an incident runbook, see
 
 ## Verifying the image
 
-Every tagged Rein release is signed with [cosign](https://docs.sigstore.dev/cosign/overview/) using a committed public key at [`cosign.pub`](./cosign.pub). Before running Rein in production, verify the image came from this repo and has not been tampered with:
+Every tagged Rein release is signed with [cosign](https://docs.sigstore.dev/cosign/overview/) using a committed public key at [`cosign.pub`](./cosign.pub). Before running Rein in production, verify the image came from this repo and has not been tampered with.
+
+Requires `cosign` v2.6 or later (ideally v3.0+). Install from the [sigstore/cosign releases page](https://github.com/sigstore/cosign/releases). Signatures are stored in the new protobuf bundle format as OCI 1.1 referring artifacts, which older cosign clients cannot read.
 
 ```bash
 cosign verify \
