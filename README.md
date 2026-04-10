@@ -115,6 +115,28 @@ Keys are persisted in a local SQLite database (`./rein.db` by default). The `ups
 
 For a longer walkthrough with a virtual-key example and an incident runbook, see [docs/quickstart.md](docs/quickstart.md).
 
+## Verifying the image
+
+Every tagged Rein release is signed with [cosign](https://docs.sigstore.dev/cosign/overview/) using a committed public key at [`cosign.pub`](./cosign.pub). Before running Rein in production, verify the image came from this repo and has not been tampered with:
+
+```bash
+cosign verify \
+  --key https://raw.githubusercontent.com/archilea/rein/main/cosign.pub \
+  ghcr.io/archilea/rein:v0.1.0
+```
+
+Replace `v0.1.0` with the release you are pulling. The command exits `0` and prints the verified payload when the signature is valid. A non-zero exit means do not run the image.
+
+You can also pin the key to a specific release tag to defend against a compromised `main` replacing the public key:
+
+```bash
+cosign verify \
+  --key https://raw.githubusercontent.com/archilea/rein/v0.1.0/cosign.pub \
+  ghcr.io/archilea/rein:v0.1.0
+```
+
+The image is signed by canonical digest, so every tag (`v0.1.0`, `0.1`, `latest`) that resolves to the same digest passes the same verification.
+
 ## Budgets
 
 Every virtual key can carry a `daily_budget_usd` and `month_budget_usd` cap. Rein parses `usage` from every upstream response, looks up USD cost in an embedded, vendor-verified pricing table (OpenAI and Anthropic models, see `internal/meter/pricing.json`), and adds it to the key's running total. On the next inbound request, Rein checks the totals before forwarding. If either cap is reached, the request returns `402 Payment Required` with a clear body and the upstream is never called.

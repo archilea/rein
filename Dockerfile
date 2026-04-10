@@ -14,13 +14,17 @@ RUN go mod download
 
 COPY . .
 
+# REIN_VERSION is injected at build time by the release workflow via --build-arg.
+# CI and local `docker build` without --build-arg fall back to "dev".
+ARG REIN_VERSION=dev
+
 RUN CGO_ENABLED=0 GOOS=linux go build \
       -trimpath \
-      -ldflags="-s -w" \
+      -ldflags="-s -w -X main.version=${REIN_VERSION}" \
       -o /out/rein ./cmd/rein
 
 # --- runtime stage ---
-FROM alpine:3.20 AS runtime
+FROM alpine:3.22 AS runtime
 
 # hadolint ignore=DL3018
 RUN apk add --no-cache ca-certificates tini && \

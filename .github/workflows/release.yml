@@ -1,14 +1,23 @@
 # Release workflow. Triggered by pushing a v*.*.* tag (e.g. v0.1.0).
 # Builds a multi-arch Docker image and publishes it to GHCR at
 # ghcr.io/archilea/rein:<semver> and ghcr.io/archilea/rein:latest.
+# Signs the pushed image with cosign (key-based) and creates a GitHub
+# Release with standalone binaries, SBOM, and checksums attached.
 #
 # Security posture:
 #   - Actions are SHA-pinned against supply-chain attacks via tag reuse.
 #   - No untrusted github.event.* payloads (issue titles, PR bodies, commit
 #     messages) are consumed in any run: step. github.actor is used only as a
-#     registry login username, not in shell expansion. github.ref_name is not
-#     referenced; version embedding via ldflags is deferred to a follow-up.
-#   - Permissions are scoped to contents:read + packages:write only.
+#     registry login username, not in shell expansion. github.ref_name is
+#     validated against a strict semver regex before it is used anywhere.
+#   - Permissions are scoped to contents:read at workflow root, elevated to
+#     packages:write on the docker job and contents:write on the release job.
+#     No id-token is requested: signing uses a committed public key with a
+#     password-protected private key stored as a GitHub Actions secret.
+#   - All Dockerfile changes are linted via hadolint before the image builds.
+#   - Tests must pass before any image is pushed or release created.
+#   - Images are signed by canonical digest once (not per-tag) so consumers
+#     can verify without ambiguity.
 name: release
 
 on:
@@ -18,15 +27,88 @@ on:
 
 permissions:
   contents: read
-  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  docker:
-    name: build and publish docker image
+  # Fail fast if the pushed tag is not strict semver. The on.push.tags glob
+  # v*.*.* is not a regex; a malformed or shell-unsafe tag would otherwise
+  # flow into filenames and docker build-args. This job is the single
+  # upstream gate that every other job depends on.
+  validate-tag:
+    name: validate tag
     runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check github.ref_name matches strict semver
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error::Tag '$REF_NAME' is not strict semver (expected vMAJOR.MINOR.PATCH[-PRERELEASE])"
+            exit 1
+          fi
+          echo "Tag $REF_NAME is valid."
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: validate-tag
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.25"
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: Run tests with race detector
+        run: go test ./... -race
+      - name: Run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          govulncheck ./...
+
+  dockerfile-lint:
+    name: hadolint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: validate-tag
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+
+  docker:
+    name: build and publish docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [test, dockerfile-lint]
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      tags: ${{ steps.meta.outputs.tags }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
@@ -52,6 +134,7 @@ jobs:
             type=raw,value=latest
 
       - name: Build and push
+        id: push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -61,3 +144,85 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           provenance: true
           sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            REIN_VERSION=${{ github.ref_name }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      # Signs the canonical image-by-digest reference once. Since the
+      # metadata-action emits multiple tags (semver, major.minor, latest)
+      # which all resolve to the same digest, signing the digest covers
+      # every tag. Signing per-tag would be redundant.
+      - name: Sign pushed image with cosign
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes --key env://COSIGN_PRIVATE_KEY \
+            "ghcr.io/archilea/rein@${DIGEST}"
+
+  release:
+    name: create github release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: docker
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Build release binaries
+        env:
+          REIN_VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            out="dist/rein-${REIN_VERSION}-${goos}-${goarch}"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
+              -trimpath \
+              -ldflags="-s -w -X main.version=${REIN_VERSION}" \
+              -o "$out" ./cmd/rein
+          done
+
+      - name: Install cyclonedx-gomod
+        run: go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.10.0
+
+      - name: Generate SBOM
+        run: cyclonedx-gomod mod -json -output dist/rein-sbom.cdx.json
+
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum rein-* > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@c062e08bd532815e2082a85e87e3ef29c3e6d191 # v2.0.8
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/rein-*-linux-amd64
+            dist/rein-*-linux-arm64
+            dist/rein-*-darwin-amd64
+            dist/rein-*-darwin-arm64
+            dist/rein-sbom.cdx.json
+            dist/checksums.txt

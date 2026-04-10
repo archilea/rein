@@ -16,7 +16,10 @@
 # Docker base image updates are deliberately not enabled yet. The Dockerfile
 # pins golang:1.25.9-alpine3.22 and alpine:3.20, and both are bumped manually
 # at release time because a base-image change can affect the binary in ways
-# that deserve a human review.
+# that deserve a human review. Reviewers MUST revisit the Dockerfile FROM
+# lines at every tagged release to pick up base-image security patches.
+#
+# Timezone is UTC so open times are neutral for global contributors.
 #
 # All Dependabot PRs should be reviewed and merged (or closed with a reason)
 # within a week of opening; otherwise the queue grows into noise.
@@ -29,7 +32,7 @@ updates:
       interval: "weekly"
       day: "monday"
       time: "09:00"
-      timezone: "Asia/Kolkata"
+      timezone: "Etc/UTC"
     open-pull-requests-limit: 5
     commit-message:
       prefix: "ci"
@@ -37,6 +40,19 @@ updates:
     labels:
       - "dependencies"
       - "ci"
+    groups:
+      docker-actions:
+        patterns:
+          - "docker/*"
+      actions-core:
+        patterns:
+          - "actions/*"
+      lint-and-security:
+        patterns:
+          - "golangci/*"
+          - "hadolint/*"
+          - "sigstore/*"
+          - "softprops/*"
 
   - package-ecosystem: "gomod"
     directory: "/"
@@ -44,7 +60,7 @@ updates:
       interval: "weekly"
       day: "monday"
       time: "09:00"
-      timezone: "Asia/Kolkata"
+      timezone: "Etc/UTC"
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps"
@@ -52,3 +68,8 @@ updates:
     labels:
       - "dependencies"
       - "go"
+    groups:
+      go-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"

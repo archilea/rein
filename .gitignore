@@ -32,3 +32,9 @@ coverage.*
 /rein.db-wal
 /rein.db-shm
 /data/
+
+# Cosign signing material. Only cosign.pub is committed; the encrypted
+# private key and any PEM-encoded key material must never land in git.
+cosign.key
+*.pem
+!*.pub.pem
