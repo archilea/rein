@@ -1,0 +1,46 @@
+name: Bug report
+description: Something is broken or not working as documented
+title: "bug: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug report. A clear reproduction is the single most important part of a good bug report.
+  - type: input
+    id: version
+    attributes:
+      label: Rein version
+      description: Output of `rein --version` or the Docker image tag.
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Minimal steps that reproduce the bug. Include the exact rein command, any config, and upstream provider if relevant.
+      placeholder: |
+        1. Run `docker run ...`
+        2. Send a request to `/v1/chat/completions`
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Include any relevant log output. Redact API keys.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, architecture, Go version, upstream provider (OpenAI / Anthropic / ...).

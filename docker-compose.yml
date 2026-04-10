@@ -1,0 +1,30 @@
+# Rein local development compose file.
+#
+# Both REIN_ADMIN_TOKEN and REIN_ENCRYPTION_KEY are required and must be set
+# in a .env file next to this compose file. See .env.example.
+#
+# Quick start:
+#   cp .env.example .env
+#   sed -i.bak "s|REIN_ADMIN_TOKEN=.*|REIN_ADMIN_TOKEN=$(openssl rand -hex 32)|" .env
+#   sed -i.bak "s|REIN_ENCRYPTION_KEY=.*|REIN_ENCRYPTION_KEY=$(openssl rand -hex 32)|" .env
+#   rm .env.bak
+#   docker compose up -d
+
+services:
+  rein:
+    build: .
+    image: ghcr.io/archilea/rein:latest
+    container_name: rein
+    ports:
+      - "8080:8080"
+    environment:
+      REIN_PORT: "8080"
+      REIN_ADMIN_TOKEN: "${REIN_ADMIN_TOKEN:?REIN_ADMIN_TOKEN is required. Generate one with: openssl rand -hex 32, then set it in .env}"
+      REIN_ENCRYPTION_KEY: "${REIN_ENCRYPTION_KEY:?REIN_ENCRYPTION_KEY is required for the SQLite keystore. Generate one with: openssl rand -hex 32, then set it in .env}"
+      REIN_DB_URL: "sqlite:/data/rein.db"
+    volumes:
+      - rein-data:/data
+    restart: unless-stopped
+
+volumes:
+  rein-data:

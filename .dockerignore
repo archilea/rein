@@ -1,0 +1,17 @@
+.git
+.github
+.idea
+.vscode
+*.md
+!README.md
+docs/
+examples/
+test/
+*.test
+coverage.*
+.env
+.env.*
+bin/
+dist/
+/rein.db*
+/data/

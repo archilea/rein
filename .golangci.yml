@@ -1,0 +1,43 @@
+# golangci-lint config for Rein.
+# Kept intentionally small so contributors can reason about what enforces what.
+# Run locally with `make lint` or `golangci-lint run`.
+
+run:
+  timeout: 3m
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck      # unchecked errors
+    - govet         # stdlib-vet, printf, atomic alignment, etc.
+    - ineffassign   # ineffectual assignments
+    - staticcheck   # bugs, simplifications, deprecations
+    - unused        # unused vars, functions, types
+    - gofmt         # standard formatting
+    - goimports     # import grouping
+    - misspell      # obvious typos in comments
+    - revive        # drop-in golint replacement, with a light ruleset
+    - gosec         # basic security checks
+
+linters-settings:
+  gosec:
+    excludes:
+      # G104 (unchecked errors) overlaps with errcheck.
+      - G104
+  revive:
+    rules:
+      - name: exported
+      - name: var-naming
+      - name: unexported-return
+      - name: error-return
+      - name: error-naming
+      - name: if-return
+      - name: redefines-builtin-id
+
+issues:
+  exclude-rules:
+    # Test files can be noisier: no docstrings on test helpers, etc.
+    - path: _test\.go
+      linters:
+        - revive
+        - errcheck

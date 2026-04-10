@@ -1,0 +1,240 @@
+package proxy
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/archilea/rein/internal/keys"
+	"github.com/archilea/rein/internal/killswitch"
+	"github.com/archilea/rein/internal/meter"
+)
+
+// These benchmarks measure Rein's own code overhead using an in-process mock
+// upstream. They are not a substitute for a production load test, but they
+// bound Rein's per-request CPU cost and the kill-switch fast-path throughput.
+//
+// Run with:
+//
+//	go test ./internal/proxy -bench . -benchtime=3s -cpu=4
+//
+// Set REIN_BENCH_QUIET=1 to silence slog during long runs. See bench_init_test.go.
+
+var mockResponse = []byte(`{"id":"chatcmpl-bench","model":"gpt-4o","object":"chat.completion","created":1775000000,"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":1,"total_tokens":13}}`)
+
+func mockUpstream() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(mockResponse)
+	}))
+}
+
+// mockUpstreamWithLatency simulates a real LLM upstream that takes `latency`
+// to produce a response. Sleeps on the server goroutine so concurrent
+// requests pile up through Rein's outbound pool as they would in production.
+func mockUpstreamWithLatency(latency time.Duration) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(latency)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(mockResponse)
+	}))
+}
+
+func buildStore(b *testing.B, useSQLite bool) keys.Store {
+	b.Helper()
+	if !useSQLite {
+		return keys.NewMemory()
+	}
+	key := make([]byte, keys.AESKeySize)
+	for i := range key {
+		key[i] = byte(i * 7)
+	}
+	cipher, err := keys.NewAESGCM(key)
+	if err != nil {
+		b.Fatal(err)
+	}
+	s, err := keys.NewSQLite(filepath.Join(b.TempDir(), "bench.db"), cipher)
+	if err != nil {
+		b.Fatal(err)
+	}
+	return s
+}
+
+func benchSetup(b *testing.B, useSQLite, withBudget bool, upstream *httptest.Server) (string, string) {
+	b.Helper()
+	store := buildStore(b, useSQLite)
+
+	id, _ := keys.GenerateID()
+	token, _ := keys.GenerateToken()
+	vk := &keys.VirtualKey{
+		ID: id, Token: token, Name: "bench",
+		Upstream: keys.UpstreamOpenAI, UpstreamKey: "sk-fake",
+		CreatedAt: time.Now().UTC(),
+	}
+	if withBudget {
+		vk.DailyBudgetUSD = 1_000_000
+		vk.MonthBudgetUSD = 1_000_000
+	}
+	if err := store.Create(context.Background(), vk); err != nil {
+		b.Fatal(err)
+	}
+
+	pricer, err := meter.LoadPricer()
+	if err != nil {
+		b.Fatal(err)
+	}
+	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), pricer, upstream.URL, "https://api.anthropic.com")
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	rein := httptest.NewServer(p)
+	b.Cleanup(rein.Close)
+
+	return rein.URL, token
+}
+
+func drive200(b *testing.B, reinURL, token string) {
+	payload := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"b"}]}`)
+	client := &http.Client{
+		Transport: &http.Transport{
+			MaxIdleConns:        500,
+			MaxIdleConnsPerHost: 500,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			req, _ := http.NewRequest("POST", reinURL+"/v1/chat/completions", bytes.NewReader(payload))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+token)
+			resp, err := client.Do(req)
+			if err != nil {
+				b.Fatal(err)
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != 200 {
+				b.Fatalf("status %d", resp.StatusCode)
+			}
+		}
+	})
+}
+
+// --- zero-latency benchmarks (isolate Rein's own per-request overhead) ---
+
+// Floor on Rein's per-request CPU cost (in-memory keystore, no budget).
+func BenchmarkRein_MemStore_NoBudget_ZeroLatency(b *testing.B) {
+	up := mockUpstream()
+	b.Cleanup(up.Close)
+	url, tok := benchSetup(b, false, false, up)
+	drive200(b, url, tok)
+}
+
+// Isolates the cost of meter.Check + meter.Record on the in-memory meter.
+func BenchmarkRein_MemStore_WithBudget_ZeroLatency(b *testing.B) {
+	up := mockUpstream()
+	b.Cleanup(up.Close)
+	url, tok := benchSetup(b, false, true, up)
+	drive200(b, url, tok)
+}
+
+// Real production keystore: SELECT by token, AES-256-GCM decrypt of
+// upstream_key per request, row scan.
+func BenchmarkRein_SQLite_NoBudget_ZeroLatency(b *testing.B) {
+	up := mockUpstream()
+	b.Cleanup(up.Close)
+	url, tok := benchSetup(b, true, false, up)
+	drive200(b, url, tok)
+}
+
+// Full production hot path: SQLite keystore + encryption + budget enforcement.
+// This is the number to quote for "how fast is Rein in production config".
+func BenchmarkRein_SQLite_WithBudget_ZeroLatency(b *testing.B) {
+	up := mockUpstream()
+	b.Cleanup(up.Close)
+	url, tok := benchSetup(b, true, true, up)
+	drive200(b, url, tok)
+}
+
+// --- realistic-latency benchmarks (throughput is bounded by upstream) ---
+
+// 500ms upstream: typical gpt-4o short response. Throughput is
+// concurrency / upstream_latency; Rein's overhead is rounding error.
+func BenchmarkRein_SQLite_WithBudget_500msLatency(b *testing.B) {
+	up := mockUpstreamWithLatency(500 * time.Millisecond)
+	b.Cleanup(up.Close)
+	url, tok := benchSetup(b, true, true, up)
+	drive200(b, url, tok)
+}
+
+// 2000ms upstream: slow-model or long-context request.
+func BenchmarkRein_SQLite_WithBudget_2sLatency(b *testing.B) {
+	up := mockUpstreamWithLatency(2 * time.Second)
+	b.Cleanup(up.Close)
+	url, tok := benchSetup(b, true, true, up)
+	drive200(b, url, tok)
+}
+
+// --- kill-switch fast-path benchmark ---
+
+// Kill-switch engaged: every request is rejected at the first check. No
+// keystore lookup, no upstream fetch, no budget evaluation. Atomic bool
+// read + 503 write. This is how fast Rein can shred traffic during an
+// incident.
+func BenchmarkRein_Frozen(b *testing.B) {
+	up := mockUpstream()
+	b.Cleanup(up.Close)
+
+	store := buildStore(b, true)
+	id, _ := keys.GenerateID()
+	token, _ := keys.GenerateToken()
+	_ = store.Create(context.Background(), &keys.VirtualKey{
+		ID: id, Token: token, Name: "bench",
+		Upstream: keys.UpstreamOpenAI, UpstreamKey: "sk-fake",
+		CreatedAt: time.Now().UTC(),
+	})
+
+	ks := killswitch.NewMemory()
+	_ = ks.SetFrozen(context.Background(), true)
+
+	pricer, _ := meter.LoadPricer()
+	p, _ := New(store, ks, meter.NewMemory(), pricer, up.URL, "https://api.anthropic.com")
+	rein := httptest.NewServer(p)
+	b.Cleanup(rein.Close)
+
+	payload := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"b"}]}`)
+	client := &http.Client{
+		Transport: &http.Transport{
+			MaxIdleConns:        500,
+			MaxIdleConnsPerHost: 500,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			req, _ := http.NewRequest("POST", rein.URL+"/v1/chat/completions", bytes.NewReader(payload))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+token)
+			resp, err := client.Do(req)
+			if err != nil {
+				b.Fatal(err)
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != 503 {
+				b.Fatalf("status %d", resp.StatusCode)
+			}
+		}
+	})
+}

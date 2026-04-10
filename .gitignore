@@ -1,0 +1,34 @@
+# Binaries
+/rein
+/bin/
+/dist/
+
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test and coverage
+*.test
+*.out
+coverage.*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Local data
+/rein.db
+/rein.db-journal
+/rein.db-wal
+/rein.db-shm
+/data/

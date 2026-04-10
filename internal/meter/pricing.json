@@ -1,0 +1,39 @@
+{
+  "source": "OpenAI: developers.openai.com/api/docs/pricing. Anthropic: claude.com/pricing",
+  "fetched_at": "2026-04-10",
+  "note": "Prices are per 1,000,000 tokens in USD. Verify against vendor docs before relying on budgets in production. Date-suffixed model IDs (e.g. claude-opus-4-5-20251101, o4-mini-2025-04-16) are matched against their base name via trailing-date stripping in the pricer. Legacy OpenAI models (gpt-4o, gpt-4.1, gpt-5, o1, o3, o3-mini, o4-mini) are retained at their historical prices from third-party aggregators; they are not advertised on the current OpenAI pricing page and should be re-verified if a budget cap is set on a production key that still calls them. See docs/pricing-notes.md if present.",
+  "models": {
+    "openai": {
+      "gpt-5.4":             { "input_per_mtok":  2.50, "output_per_mtok":  15.00 },
+      "gpt-5.4-mini":        { "input_per_mtok":  0.75, "output_per_mtok":   4.50 },
+      "gpt-5.4-nano":        { "input_per_mtok":  0.20, "output_per_mtok":   1.25 },
+      "gpt-5.4-pro":         { "input_per_mtok": 30.00, "output_per_mtok": 180.00 },
+      "gpt-5.3-chat-latest": { "input_per_mtok":  1.75, "output_per_mtok":  14.00 },
+      "gpt-5.3-codex":       { "input_per_mtok":  1.75, "output_per_mtok":  14.00 },
+      "gpt-5":               { "input_per_mtok":  1.25, "output_per_mtok":  10.00 },
+      "gpt-4o":              { "input_per_mtok":  2.50, "output_per_mtok":  10.00 },
+      "gpt-4o-mini":         { "input_per_mtok":  0.15, "output_per_mtok":   0.60 },
+      "gpt-4.1":             { "input_per_mtok":  2.00, "output_per_mtok":   8.00 },
+      "gpt-4.1-mini":        { "input_per_mtok":  0.40, "output_per_mtok":   1.60 },
+      "gpt-4.1-nano":        { "input_per_mtok":  0.10, "output_per_mtok":   0.40 },
+      "o1":                  { "input_per_mtok": 15.00, "output_per_mtok":  60.00 },
+      "o3":                  { "input_per_mtok":  2.00, "output_per_mtok":   8.00 },
+      "o3-mini":              { "input_per_mtok":  1.10, "output_per_mtok":  4.40 },
+      "o4-mini":              { "input_per_mtok":  1.10, "output_per_mtok":  4.40 }
+    },
+    "anthropic": {
+      "claude-opus-4-6":   { "input_per_mtok":  5.00, "output_per_mtok": 25.00 },
+      "claude-opus-4-5":   { "input_per_mtok":  5.00, "output_per_mtok": 25.00 },
+      "claude-opus-4-1":   { "input_per_mtok": 15.00, "output_per_mtok": 75.00 },
+      "claude-opus-4":     { "input_per_mtok": 15.00, "output_per_mtok": 75.00 },
+      "claude-opus-3":     { "input_per_mtok": 15.00, "output_per_mtok": 75.00 },
+      "claude-sonnet-4-6": { "input_per_mtok":  3.00, "output_per_mtok": 15.00 },
+      "claude-sonnet-4-5": { "input_per_mtok":  3.00, "output_per_mtok": 15.00 },
+      "claude-sonnet-4":   { "input_per_mtok":  3.00, "output_per_mtok": 15.00 },
+      "claude-sonnet-3-7": { "input_per_mtok":  3.00, "output_per_mtok": 15.00 },
+      "claude-haiku-4-5":  { "input_per_mtok":  1.00, "output_per_mtok":  5.00 },
+      "claude-haiku-3-5":  { "input_per_mtok":  0.80, "output_per_mtok":  4.00 },
+      "claude-haiku-3":    { "input_per_mtok":  0.25, "output_per_mtok":  1.25 }
+    }
+  }
+}
