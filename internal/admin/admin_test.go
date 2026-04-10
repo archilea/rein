@@ -252,9 +252,36 @@ func TestAdmin_RevokeKey(t *testing.T) {
 
 func TestAdmin_RevokeKey_NotFound(t *testing.T) {
 	_, _, _, mux := newTestServer(t)
-	rec := postAuthed(t, mux, "/admin/v1/keys/key_nope/revoke", "")
+	// Use a syntactically valid ID (matches keys.ValidID) that does not
+	// exist in the fresh store. This exercises the 404-from-store path,
+	// not the 400-from-format-check path.
+	rec := postAuthed(t, mux, "/admin/v1/keys/key_0000000000000000/revoke", "")
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("got %d want 404", rec.Code)
+	}
+}
+
+// TestAdmin_RevokeKey_InvalidFormat confirms that a malformed key ID in the
+// URL path is rejected with 400 before any keystore lookup or log line is
+// emitted. This is the first-line defense that makes the gosec G706
+// exclusion in .golangci.yml unconditionally safe.
+func TestAdmin_RevokeKey_InvalidFormat(t *testing.T) {
+	_, _, _, mux := newTestServer(t)
+	cases := []string{
+		"key_nope",                        // too short
+		"token_a1b2c3d4e5f60718",          // wrong prefix
+		"key_A1B2C3D4E5F60718",            // uppercase hex rejected by our regex
+		"key_a1b2c3d4e5f60718extra",       // too long
+		"key_a1b2c3d4e5f6071%0A",          // encoded newline injection attempt
+		"key_a1b2c3d4e5f60718%2F..%2Fetc", // path traversal attempt
+	}
+	for _, id := range cases {
+		t.Run(id, func(t *testing.T) {
+			rec := postAuthed(t, mux, "/admin/v1/keys/"+id+"/revoke", "")
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("id=%q: got %d want 400; body=%s", id, rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 

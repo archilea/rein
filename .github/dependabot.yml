@@ -1,0 +1,54 @@
+# Dependabot keeps Rein's external dependencies current without manual effort.
+#
+# We watch two ecosystems:
+#
+#   1. github-actions: the actions referenced from .github/workflows/*.yml
+#      (setup-go, golangci-lint-action, docker/login-action, etc.). This is
+#      the primary reason dependabot exists on this repo. When
+#      golangci-lint-action ships a new version, Dependabot opens a PR bumping
+#      the SHA-pinned `uses:` line. That is the main durability guard against
+#      the "golangci-lint silently no-op'd because the linter pre-dated the
+#      Go release" class of bug.
+#
+#   2. gomod: the module graph in go.mod. Catches security updates in the
+#      pure-Go SQLite driver and any other direct or transitive dependency.
+#
+# Docker base image updates are deliberately not enabled yet. The Dockerfile
+# pins golang:1.25.9-alpine3.22 and alpine:3.20, and both are bumped manually
+# at release time because a base-image change can affect the binary in ways
+# that deserve a human review.
+#
+# All Dependabot PRs should be reviewed and merged (or closed with a reason)
+# within a week of opening; otherwise the queue grows into noise.
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "ci"
+
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "go"

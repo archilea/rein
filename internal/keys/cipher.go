@@ -22,7 +22,7 @@ type Cipher interface {
 	Decrypt(encoded string) (string, error)
 }
 
-// Encryption key size for AES-256-GCM.
+// AESKeySize is the required key size in bytes for AES-256-GCM encryption.
 const AESKeySize = 32
 
 // v1 tag identifies values produced by NewAESGCM. Everything after the prefix

@@ -101,9 +101,20 @@ func (s *SQLite) GetByID(ctx context.Context, id string) (*VirtualKey, error) {
 }
 
 func (s *SQLite) queryOne(ctx context.Context, column, value string) (*VirtualKey, error) {
-	// column is a fixed internal identifier, not user input. Safe to interpolate.
-	q := fmt.Sprintf(`SELECT id, token, name, upstream, upstream_key, daily_budget_usd,
-		month_budget_usd, created_at, revoked_at FROM virtual_keys WHERE %s = ?`, column)
+	// Explicit allow-list of lookup columns. Callers inside this package are the
+	// only producers; branching on the literal avoids fmt.Sprintf-into-SQL
+	// (gosec G201) and makes the set of supported lookups obvious to a reader.
+	var q string
+	switch column {
+	case "id":
+		q = `SELECT id, token, name, upstream, upstream_key, daily_budget_usd,
+			month_budget_usd, created_at, revoked_at FROM virtual_keys WHERE id = ?`
+	case "token":
+		q = `SELECT id, token, name, upstream, upstream_key, daily_budget_usd,
+			month_budget_usd, created_at, revoked_at FROM virtual_keys WHERE token = ?`
+	default:
+		return nil, fmt.Errorf("queryOne: unsupported lookup column %q", column)
+	}
 	row := s.db.QueryRowContext(ctx, q, value)
 	return s.scanKey(row.Scan)
 }
@@ -117,7 +128,7 @@ func (s *SQLite) List(ctx context.Context) ([]*VirtualKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("query keys: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []*VirtualKey
 	for rows.Next() {

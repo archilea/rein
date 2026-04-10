@@ -92,12 +92,12 @@ func TestPricer_CurrentGenerationModels(t *testing.T) {
 		wantCost        float64
 	}{
 		// OpenAI current generation (gpt-5.4 family).
-		{"openai", "gpt-5.4", 17.50},               // $2.50 + $15.00
-		{"openai", "gpt-5.4-mini", 5.25},           // $0.75 + $4.50
-		{"openai", "gpt-5.4-nano", 1.45},           // $0.20 + $1.25
-		{"openai", "gpt-5.4-pro", 210.00},          // $30.00 + $180.00
-		{"openai", "gpt-5.3-chat-latest", 15.75},   // $1.75 + $14.00
-		{"openai", "gpt-5.3-codex", 15.75},         // $1.75 + $14.00
+		{"openai", "gpt-5.4", 17.50},             // $2.50 + $15.00
+		{"openai", "gpt-5.4-mini", 5.25},         // $0.75 + $4.50
+		{"openai", "gpt-5.4-nano", 1.45},         // $0.20 + $1.25
+		{"openai", "gpt-5.4-pro", 210.00},        // $30.00 + $180.00
+		{"openai", "gpt-5.3-chat-latest", 15.75}, // $1.75 + $14.00
+		{"openai", "gpt-5.3-codex", 15.75},       // $1.75 + $14.00
 		// Anthropic deprecated-but-callable models.
 		{"anthropic", "claude-sonnet-3-7", 18.00}, // $3 + $15
 		{"anthropic", "claude-opus-3", 90.00},     // $15 + $75

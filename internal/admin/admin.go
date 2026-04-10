@@ -214,8 +214,12 @@ func (s *Server) handleListKeys(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRevokeKey(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if id == "" {
-		http.Error(w, "key id is required", http.StatusBadRequest)
+	if !keys.ValidID(id) {
+		// Reject anything that is not the exact "key_" + 16 hex format before
+		// it reaches the keystore or any log line. A true from ValidID is a
+		// hard guarantee that the remainder of the handler cannot log or
+		// render an attacker-controlled string.
+		http.Error(w, "invalid key id", http.StatusBadRequest)
 		return
 	}
 	if err := s.keys.Revoke(r.Context(), id); err != nil {

@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -174,6 +175,21 @@ func GenerateToken() (string, error) {
 // IsReinToken reports whether s has the Rein virtual-key prefix.
 func IsReinToken(s string) bool {
 	return strings.HasPrefix(s, tokenPrefix)
+}
+
+// validIDPattern matches a well-formed admin identifier as produced by
+// GenerateID: the "key_" prefix followed by exactly 16 lowercase hex chars.
+// Intentionally strict so admin handlers can reject malformed path parameters
+// before they reach the keystore, any log line, or any error response.
+var validIDPattern = regexp.MustCompile(`^key_[a-f0-9]{16}$`)
+
+// ValidID reports whether s is a syntactically well-formed virtual-key admin
+// identifier. A true return guarantees the string contains only the literal
+// "key_" followed by 16 lowercase hex characters, so it is safe to pass to
+// log fields, error responses, and URL templates without further escaping.
+// It does NOT confirm the key exists in the store.
+func ValidID(s string) bool {
+	return validIDPattern.MatchString(s)
 }
 
 func randomHex(n int) (string, error) {

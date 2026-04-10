@@ -1,43 +1,58 @@
 # golangci-lint config for Rein.
 # Kept intentionally small so contributors can reason about what enforces what.
 # Run locally with `make lint` or `golangci-lint run`.
+#
+# Config is in v2 format. golangci-lint v1 will reject this file; use >= v2.1.0.
+
+version: "2"
 
 run:
   timeout: 3m
 
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck      # unchecked errors
     - govet         # stdlib-vet, printf, atomic alignment, etc.
     - ineffassign   # ineffectual assignments
     - staticcheck   # bugs, simplifications, deprecations
     - unused        # unused vars, functions, types
-    - gofmt         # standard formatting
-    - goimports     # import grouping
     - misspell      # obvious typos in comments
     - revive        # drop-in golint replacement, with a light ruleset
     - gosec         # basic security checks
-
-linters-settings:
-  gosec:
-    excludes:
-      # G104 (unchecked errors) overlaps with errcheck.
-      - G104
-  revive:
+  settings:
+    gosec:
+      excludes:
+        # G104 (unchecked errors) overlaps with errcheck.
+        - G104
+        # G706 (log injection) is unreachable in Rein's actual call paths for
+        # two independent reasons: (1) admin handlers validate URL path params
+        # via keys.ValidID before any logging, so the `id` variable cannot
+        # contain control characters by the time it reaches slog; (2) Rein's
+        # logger is slog.NewJSONHandler which JSON-escapes every field value
+        # anyway (see cmd/rein/main.go). Either defense is sufficient on its
+        # own; both together make this a pure false positive.
+        - G706
+    revive:
+      rules:
+        - name: exported
+        - name: var-naming
+        - name: unexported-return
+        - name: error-return
+        - name: error-naming
+        - name: if-return
+        - name: redefines-builtin-id
+  exclusions:
     rules:
-      - name: exported
-      - name: var-naming
-      - name: unexported-return
-      - name: error-return
-      - name: error-naming
-      - name: if-return
-      - name: redefines-builtin-id
+      # Test files can be noisier: no docstrings on test helpers, fixture
+      # strings that look like credentials, etc.
+      - path: _test\.go
+        linters:
+          - revive
+          - errcheck
+          - gosec
 
-issues:
-  exclude-rules:
-    # Test files can be noisier: no docstrings on test helpers, etc.
-    - path: _test\.go
-      linters:
-        - revive
-        - errcheck
+formatters:
+  enable:
+    - gofmt
+    - goimports
