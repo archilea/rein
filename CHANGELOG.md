@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Durable SQLite-backed spend meter so budget totals survive process restart.
 - Encryption key rotation tool (`rein-rotate-keys`).
 
-## [0.1.0] - TBD
+## [0.1.0] - 2026-04-10
 
 First public alpha. Single Go binary (pure Go, no CGO). Under 2,000 lines of
 non-test code. No telemetry, ever.
