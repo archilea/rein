@@ -124,20 +124,20 @@ Requires `cosign` v2.6 or later (ideally v3.0+). Install from the [sigstore/cosi
 ```bash
 cosign verify \
   --key https://raw.githubusercontent.com/archilea/rein/main/cosign.pub \
-  ghcr.io/archilea/rein:0.1.0
+  ghcr.io/archilea/rein:0.1.1
 ```
 
-Replace `0.1.0` with the release you are pulling. The command exits `0` and prints the verified payload when the signature is valid. A non-zero exit means do not run the image.
+Replace `0.1.1` with the release you are pulling. The command exits `0` and prints the verified payload when the signature is valid. A non-zero exit means do not run the image.
 
 You can also pin the key to a specific release tag to defend against a compromised `main` replacing the public key:
 
 ```bash
 cosign verify \
-  --key https://raw.githubusercontent.com/archilea/rein/0.1.0/cosign.pub \
-  ghcr.io/archilea/rein:0.1.0
+  --key https://raw.githubusercontent.com/archilea/rein/0.1.1/cosign.pub \
+  ghcr.io/archilea/rein:0.1.1
 ```
 
-The image is signed by canonical digest, so every tag (`0.1.0`, `0.1`, `latest`) that resolves to the same digest passes the same verification.
+The image is signed by canonical digest, so every tag (`0.1.1`, `0.1`, `latest`) that resolves to the same digest passes the same verification.
 
 ## Budgets
 

@@ -26,7 +26,7 @@ We aim to acknowledge within 48 hours and provide a fix or mitigation within 14 
 
 Every tagged release is signed with [cosign](https://docs.sigstore.dev/cosign/overview/) using a committed public key at `cosign.pub` in the repo root. Signing happens inside the GitHub Actions release pipeline (`.github/workflows/release.yml`) only after tests, govulncheck, and hadolint pass. The private key is held exclusively in the `COSIGN_PRIVATE_KEY` GitHub Actions secret, password-protected with `COSIGN_PASSWORD`, and is never exposed to pull requests, forks, or non-tag workflow runs.
 
-Images are signed by canonical digest once per release, so every tag (`0.1.0`, `0.1`, `latest`) that resolves to the same digest passes the same verification. See the [Verifying the image](./README.md#verifying-the-image) section of the README for the `cosign verify` command.
+Images are signed by canonical digest once per release, so every tag (`0.1.1`, `0.1`, `latest`) that resolves to the same digest passes the same verification. See the [Verifying the image](./README.md#verifying-the-image) section of the README for the `cosign verify` command.
 
 ### Key rotation
 

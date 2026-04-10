@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Durable SQLite-backed spend meter so budget totals survive process restart.
 - Encryption key rotation tool (`rein-rotate-keys`).
 
-## [0.1.0] - 2026-04-10
+## [0.1.1] - 2026-04-10
 
 First public alpha. Single Go binary (pure Go, no CGO). Under 2,000 lines of
 non-test code. No telemetry, ever.
@@ -96,5 +96,5 @@ non-test code. No telemetry, ever.
   budgets at the upstream gateway instead, or treat budgets as
   observability-only in this topology.
 
-[Unreleased]: https://github.com/archilea/rein/compare/0.1.0...HEAD
-[0.1.0]: https://github.com/archilea/rein/releases/tag/0.1.0
+[Unreleased]: https://github.com/archilea/rein/compare/0.1.1...HEAD
+[0.1.1]: https://github.com/archilea/rein/releases/tag/0.1.1

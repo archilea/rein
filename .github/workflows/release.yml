@@ -1,4 +1,4 @@
-# Release workflow. Triggered by pushing a MAJOR.MINOR.PATCH tag (e.g. 0.1.0).
+# Release workflow. Triggered by pushing a MAJOR.MINOR.PATCH tag (e.g. 0.1.1).
 # Rein follows the SemVer spec tag convention without a "v" prefix.
 # Builds a multi-arch Docker image and publishes it to GHCR at
 # ghcr.io/archilea/rein:<semver> and ghcr.io/archilea/rein:latest.
