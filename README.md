@@ -124,20 +124,20 @@ Requires `cosign` v2.6 or later (ideally v3.0+). Install from the [sigstore/cosi
 ```bash
 cosign verify \
   --key https://raw.githubusercontent.com/archilea/rein/main/cosign.pub \
-  ghcr.io/archilea/rein:v0.1.0
+  ghcr.io/archilea/rein:0.1.0
 ```
 
-Replace `v0.1.0` with the release you are pulling. The command exits `0` and prints the verified payload when the signature is valid. A non-zero exit means do not run the image.
+Replace `0.1.0` with the release you are pulling. The command exits `0` and prints the verified payload when the signature is valid. A non-zero exit means do not run the image.
 
 You can also pin the key to a specific release tag to defend against a compromised `main` replacing the public key:
 
 ```bash
 cosign verify \
-  --key https://raw.githubusercontent.com/archilea/rein/v0.1.0/cosign.pub \
-  ghcr.io/archilea/rein:v0.1.0
+  --key https://raw.githubusercontent.com/archilea/rein/0.1.0/cosign.pub \
+  ghcr.io/archilea/rein:0.1.0
 ```
 
-The image is signed by canonical digest, so every tag (`v0.1.0`, `0.1`, `latest`) that resolves to the same digest passes the same verification.
+The image is signed by canonical digest, so every tag (`0.1.0`, `0.1`, `latest`) that resolves to the same digest passes the same verification.
 
 ## Budgets
 
@@ -160,7 +160,7 @@ Two things to know, because honesty is the whole point of this project:
 
 1. **Budgets are soft in one narrow sense.** Check runs before the upstream fetch, Record runs after. A burst of N concurrent requests can all pass Check at the same total, so the cap can overshoot by up to `N × average_request_cost`. The kill-switch is the independent hard stop. For real production guarantees, set `daily_budget_usd` with a safety margin below the bill you actually want to cap at.
 
-2. **v0.1 uses an in-process meter that resets on restart.** Spend totals live in memory. If the Rein process crashes and restarts, counters reset to zero. This is fine for single-replica deployments where a crash means a deliberate restart, and disastrous for loops that would otherwise climb indefinitely. A SQLite-backed durable meter is the top item on the v0.2 roadmap. Set a conservative cap and pin a single replica until it lands.
+2. **0.1 uses an in-process meter that resets on restart.** Spend totals live in memory. If the Rein process crashes and restarts, counters reset to zero. This is fine for single-replica deployments where a crash means a deliberate restart, and disastrous for loops that would otherwise climb indefinitely. A SQLite-backed durable meter is the top item on the 0.2 roadmap. Set a conservative cap and pin a single replica until it lands.
 
 Budgets use the embedded pricing table under `internal/meter/pricing.json`, which was verified against vendor docs on the date shown in the `fetched_at` field. Verify against your own account's pricing before turning on caps in production. Unknown or newly released models are logged and skipped (they do not count toward spend) so a new model release never breaks the proxy.
 
@@ -256,7 +256,7 @@ On a 4-core VM, a single Rein instance can sustain thousands of concurrent in-fl
 - **These numbers are from a laptop.** Bigger servers with more cores should scale roughly linearly, but we have not benchmarked at scale yet.
 - **The mock upstream is in-process.** `httptest.NewServer` uses a real loopback listener but adds near-zero latency. Real TCP and TLS add a few hundred microseconds per new connection, amortized to near-zero with keep-alive.
 - **Streaming is not in the table.** SSE throughput depends on chunk size, not Rein's code path. The tee reader adds one copy per `Read`, which is well under 1 ms for typical chat completions.
-- **The v0.1 spend meter is in-process.** The v0.2 durable SQLite meter will add a second query per request and push the SQLite-path overhead from 5 µs to something in the 15-30 µs range. Still negligible next to LLM latency.
+- **The 0.1 spend meter is in-process.** The 0.2 durable SQLite meter will add a second query per request and push the SQLite-path overhead from 5 µs to something in the 15-30 µs range. Still negligible next to LLM latency.
 
 ### Reproducing
 
@@ -298,18 +298,18 @@ Rein is configured via environment variables. Only `REIN_ADMIN_TOKEN` is require
 
 Kept deliberately short. Features that would break the size ceiling are not here.
 
-- [x] `v0.1` OpenAI and Anthropic reverse proxy
-- [x] `v0.1` Kill-switch (instant freeze via admin API)
-- [x] `v0.1` Virtual keys with upstream key swap
-- [x] `v0.1` Admin endpoints for key creation, listing, and revocation
-- [x] `v0.1` Durable keystore (SQLite, pure-Go driver, no CGO)
-- [x] `v0.1` Encrypt `upstream_key` at rest (AES-256-GCM, env-scoped key)
-- [x] `v0.1` Budget enforcement (daily and monthly caps per key)
-- [x] `v0.1` Embedded vendor-verified pricing table for OpenAI and Anthropic
-- [x] `v0.1` Streaming token usage extraction (SSE) for OpenAI and Anthropic
-- [ ] `v0.2` Durable SQLite-backed meter (spend survives restart)
-- [ ] `v0.2` Encryption key rotation tool
-- [ ] `v0.3` Slack / Discord / webhook alerts at budget thresholds
+- [x] `0.1` OpenAI and Anthropic reverse proxy
+- [x] `0.1` Kill-switch (instant freeze via admin API)
+- [x] `0.1` Virtual keys with upstream key swap
+- [x] `0.1` Admin endpoints for key creation, listing, and revocation
+- [x] `0.1` Durable keystore (SQLite, pure-Go driver, no CGO)
+- [x] `0.1` Encrypt `upstream_key` at rest (AES-256-GCM, env-scoped key)
+- [x] `0.1` Budget enforcement (daily and monthly caps per key)
+- [x] `0.1` Embedded vendor-verified pricing table for OpenAI and Anthropic
+- [x] `0.1` Streaming token usage extraction (SSE) for OpenAI and Anthropic
+- [ ] `0.2` Durable SQLite-backed meter (spend survives restart)
+- [ ] `0.2` Encryption key rotation tool
+- [ ] `0.3` Slack / Discord / webhook alerts at budget thresholds
 
 ## Contributing
 

@@ -6,7 +6,7 @@ Rein is a small, opinionated reverse proxy with three responsibilities:
 2. **Meter** token usage and USD cost from the upstream response, streaming or not.
 3. **Enforce** per-key daily and monthly USD caps plus a global kill-switch, both in front of every upstream call.
 
-Everything else (observability, evals, tracing, prompt caching, routing, fallbacks, schema translation) is explicitly out of scope for v0.1.
+Everything else (observability, evals, tracing, prompt caching, routing, fallbacks, schema translation) is explicitly out of scope for 0.1.
 
 ## Request pipeline
 
@@ -30,7 +30,7 @@ Each virtual key carries an optional `daily_budget_usd` and `month_budget_usd` c
 Two properties worth naming explicitly:
 
 1. **Budgets are soft under concurrent bursts.** Check runs before the upstream fetch, Record runs after. `N` concurrent requests can all pass Check at the same total, so the cap can overshoot by up to `N × average_request_cost`. The kill-switch is the independent hard stop. Set caps with a safety margin if you need a true ceiling.
-2. **The v0.1 spend meter is in-process and non-durable.** Totals live in memory and reset on process restart. A durable SQLite-backed meter is the top item on the v0.2 roadmap. Pin a single replica until it lands.
+2. **The 0.1 spend meter is in-process and non-durable.** Totals live in memory and reset on process restart. A durable SQLite-backed meter is the top item on the 0.2 roadmap. Pin a single replica until it lands.
 
 ## Streaming
 
@@ -47,14 +47,14 @@ One table. One driver. No CGO.
 
 - **Keystore.** `virtual_keys` in SQLite via `modernc.org/sqlite` (pure Go). WAL mode is enabled so reads do not block writes. The `upstream_key` column is encrypted at rest with AES-256-GCM using a key supplied via `REIN_ENCRYPTION_KEY`. Rein refuses to start without the key, so plaintext credentials cannot land on disk by accident. Ciphertext carries a `v1:` tag so future algorithm rotations do not require a schema migration.
 - **Kill-switch.** In-process `atomic.Bool`. The kill-switch is global to the process and does not persist across restarts by design: a crash-restart that clears it is the signal to investigate why the process went down.
-- **Spend meter.** In-process maps keyed by `(key_id, day)` and `(key_id, month)` under a mutex. Totals reset on restart. The v0.2 roadmap replaces this with a durable SQLite-backed meter.
+- **Spend meter.** In-process maps keyed by `(key_id, day)` and `(key_id, month)` under a mutex. Totals reset on restart. The 0.2 roadmap replaces this with a durable SQLite-backed meter.
 
 Supported `REIN_DB_URL` schemes:
 
 - `sqlite:<path>`. The default. Durable on-disk storage with the `upstream_key` column encrypted at rest.
 - `memory`. Ephemeral, in-memory only. Useful for tests and throw-away runs.
 
-There is no Postgres driver in v0.1 and no plan to add one in v0.2. The design target is single-replica deployments where the process is the consistency boundary. Multi-replica coordination is a different product.
+There is no Postgres driver in 0.1 and no plan to add one in 0.2. The design target is single-replica deployments where the process is the consistency boundary. Multi-replica coordination is a different product.
 
 All datetimes are persisted and compared in UTC.
 

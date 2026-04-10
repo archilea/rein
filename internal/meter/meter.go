@@ -31,9 +31,9 @@ type Meter interface {
 
 // Memory is an in-process Meter. Spend totals are lost on restart.
 //
-// This is suitable for single-replica v0.1 deployments. For multi-replica
+// This is suitable for single-replica 0.1 deployments. For multi-replica
 // setups or for strict "survive an OOM" guarantees, a durable Meter backed by
-// SQLite or Redis is needed (tracked for v0.2).
+// SQLite or Redis is needed (tracked for 0.2).
 type Memory struct {
 	mu    sync.Mutex
 	spend map[string]float64 // key: "<keyID>|<period>"

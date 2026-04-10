@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Planned for v0.2
+### Planned for 0.2
 
 - Durable SQLite-backed spend meter so budget totals survive process restart.
 - Encryption key rotation tool (`rein-rotate-keys`).
@@ -73,7 +73,7 @@ non-test code. No telemetry, ever.
   Rein process restarts. Fine for single-replica deployments where a crash
   implies a deliberate restart. Not fine for crash-loop pods: a loop that
   would otherwise climb indefinitely could reset the counter and double-spend.
-  A SQLite-backed durable meter is the top item on the v0.2 roadmap. Until
+  A SQLite-backed durable meter is the top item on the 0.2 roadmap. Until
   then, pin a single replica and set caps with a safety margin below the
   bill you actually want to cap at.
 - **Soft cap under concurrent bursts.** Check runs before the upstream fetch,
@@ -82,7 +82,7 @@ non-test code. No telemetry, ever.
   The kill-switch is the independent hard stop.
 - **Encryption key rotation** is not yet supported. Changing
   `REIN_ENCRYPTION_KEY` renders the existing database unreadable. A one-shot
-  rotation tool is planned for v0.2.
+  rotation tool is planned for 0.2.
 - **Admin API has no pagination** on `GET /admin/v1/keys`. Not a problem at
   alpha scale; tracked as a future enhancement.
 - **Model aliases in front-end gateways bypass spend recording.** When Rein
@@ -96,5 +96,5 @@ non-test code. No telemetry, ever.
   budgets at the upstream gateway instead, or treat budgets as
   observability-only in this topology.
 
-[Unreleased]: https://github.com/archilea/rein/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/archilea/rein/releases/tag/v0.1.0
+[Unreleased]: https://github.com/archilea/rein/compare/0.1.0...HEAD
+[0.1.0]: https://github.com/archilea/rein/releases/tag/0.1.0
