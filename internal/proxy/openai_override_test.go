@@ -20,7 +20,7 @@ import (
 // the correct host. This is the core contract of #24.
 func TestOpenAI_PerKeyBaseURLOverride(t *testing.T) {
 	var (
-		defaultHits int64
+		defaultHits  int64
 		overrideHits int64
 	)
 	defaultUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
