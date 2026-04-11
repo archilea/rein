@@ -22,8 +22,16 @@ services:
       REIN_ADMIN_TOKEN: "${REIN_ADMIN_TOKEN:?REIN_ADMIN_TOKEN is required. Generate one with: openssl rand -hex 32, then set it in .env}"
       REIN_ENCRYPTION_KEY: "${REIN_ENCRYPTION_KEY:?REIN_ENCRYPTION_KEY is required for the SQLite keystore. Generate one with: openssl rand -hex 32, then set it in .env}"
       REIN_DB_URL: "sqlite:/data/rein.db"
+      # Uncomment the two lines below to enable operator-editable pricing
+      # overrides (#25). Pair with the commented-out rein-config volume mount
+      # below. Omit to run against just the embedded pricing table.
+      # REIN_CONFIG_FILE: "/etc/rein/rein.json"
+      # REIN_CONFIG_POLL_INTERVAL: "${REIN_CONFIG_POLL_INTERVAL:-}"
     volumes:
       - rein-data:/data
+      # Uncomment to bind-mount an operator-editable rein.json at the default
+      # config path. See docs/quickstart.md section 3b for the file format.
+      # - ./rein.json:/etc/rein/rein.json:ro
     restart: unless-stopped
 
 volumes:
