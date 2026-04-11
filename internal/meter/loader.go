@@ -22,10 +22,10 @@ const ConfigSchemaVersion = "1"
 // compatible change and does not bump ConfigSchemaVersion; removing or
 // renaming a field is a breaking change and does.
 type configFile struct {
-	Version   string                             `json:"version"`
-	Source    string                             `json:"source,omitempty"`
-	FetchedAt string                             `json:"fetched_at,omitempty"`
-	Models    map[string]map[string]ModelPrice   `json:"models"`
+	Version   string                           `json:"version"`
+	Source    string                           `json:"source,omitempty"`
+	FetchedAt string                           `json:"fetched_at,omitempty"`
+	Models    map[string]map[string]ModelPrice `json:"models"`
 }
 
 // ErrUnknownConfigVersion is returned when the config file's version
@@ -118,11 +118,11 @@ func LoadConfigFile(path string, base *Pricer) (*Pricer, error) {
 	// is the invariant the PricerHolder.Swap contract relies on.
 	merged := make(map[string]map[string]ModelPrice, len(base.models))
 	for upstream, table := range base.models {
-		copy := make(map[string]ModelPrice, len(table))
+		dup := make(map[string]ModelPrice, len(table))
 		for model, price := range table {
-			copy[model] = price
+			dup[model] = price
 		}
-		merged[upstream] = copy
+		merged[upstream] = dup
 	}
 	overrideCount := 0
 	addCount := 0
