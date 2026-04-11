@@ -1,12 +1,12 @@
 # Architecture
 
-Rein is a small, opinionated reverse proxy with three responsibilities:
+Rein is a modern, lightweight reverse proxy for LLMs with three responsibilities:
 
 1. **Forward** requests to upstream LLM providers, swapping a rein virtual key for the real upstream key at the edge.
 2. **Meter** token usage and USD cost from the upstream response, streaming or not.
 3. **Enforce** per-key daily and monthly USD caps plus a global kill-switch, both in front of every upstream call.
 
-Everything else (observability, evals, tracing, prompt caching, routing, fallbacks, schema translation) is explicitly out of scope for 0.1.
+Everything else (observability, evals, tracing, prompt caching, routing, fallbacks, schema translation) is explicitly out of scope.
 
 ## Request pipeline
 
