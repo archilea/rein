@@ -10,7 +10,7 @@ body:
 
         RFCs exist because some changes have real tradeoffs that cannot be decided in a PR review. Filing one means: "I want to discuss this shape before anyone writes code." Fill in every required field honestly. Leaving the open-questions section empty is the most common sign that an issue should be a regular feature request instead of an RFC.
 
-        Rein stays small on purpose. Before you file, re-read `README.md:299` and `README.md:318`.
+        Rein stays small on purpose. Before you file, re-read [README.md#what-rein-deliberately-does-not-do](../../README.md#what-rein-deliberately-does-not-do) and [README.md#audit-friendly-ceiling](../../README.md#audit-friendly-ceiling).
   - type: textarea
     id: summary
     attributes:

@@ -2,9 +2,9 @@
 
 # Rein
 
-### A small, boring cost and safety brake for LLM API traffic.
+### A modern, lightweight reverse proxy for LLMs.
 
-Rein brakes LLM spend at the edge. It is a small Go reverse proxy that sits between your apps and OpenAI or Anthropic, enforcing hard USD budget caps per virtual key, metering spend from streaming and non-streaming responses, and exposing an instant global kill-switch for incident response. Drop it in front of your direct provider calls, or beside your existing AI gateway. Single static Go binary, no CGO. Under 2,000 lines of code. No telemetry, ever.
+Rein is a small, auditable Go reverse proxy that sits between your apps and the major LLM providers. It swaps virtual keys for real upstream credentials at the edge, meters token spend from streaming and non-streaming responses, enforces hard USD budget caps per key, and exposes an instant global kill-switch for incident response. Native adapters ship for OpenAI and Anthropic, with a per-key base URL override for any OpenAI-compatible provider. Single static binary, pure Go, no CGO. Under 2,000 lines of code. No telemetry, ever.
 
 [![CI](https://github.com/archilea/rein/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/archilea/rein/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
@@ -21,28 +21,29 @@ Rein brakes LLM spend at the edge. It is a small Go reverse proxy that sits betw
 
 ## Core features
 
-The two brakes:
+Reverse proxy:
 
-1. **Hard budget caps** per virtual key, daily and monthly USD. Rein checks accumulated spend before every upstream fetch; breach returns `402 Payment Required` and the upstream is never called.
-2. **Instant global kill-switch** via `POST /admin/v1/killswitch`. One HTTP call and every `/v1/*` request returns `503 Service Unavailable` with `Retry-After: 60` until someone unfreezes, regardless of key or model. It's a single `atomic.Bool` read on the hot path, effectively free when off, instant when on. No restart, no config edit.
+1. **Reverse proxy** for OpenAI (`/v1/chat/*`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, `/v1/audio/*`, `/v1/images/*`) and Anthropic (`/v1/messages`). Streaming-aware with pure passthrough. Per-key upstream base URL override unlocks any OpenAI-compatible provider without additional adapter code.
+2. **Virtual keys** (`rein_live_*`) that wrap your real upstream credentials. Clients never see the upstream key. Rotating a compromised credential is one admin API call; old rein tokens keep working until you revoke them.
+3. **Admin API** for virtual key create, list, revoke, and kill-switch, all protected by a single bearer token compared in constant time.
 
-What keeps the brakes honest:
+Cost and safety controls:
 
-3. **Spend metering** from both JSON and SSE streaming responses, priced against an embedded pricing table that was verified against OpenAI and Anthropic vendor docs. Dated model snapshots (`claude-opus-4-5-20251101`, `gpt-4o-2024-08-06`) resolve to their base entries automatically, so new model releases do not break metering.
-4. **Streaming usage auto-inject.** For OpenAI chat completions, Rein injects `stream_options.include_usage: true` into the outbound body so the upstream returns a final usage chunk. Streaming clients cannot silently bypass budget enforcement. An explicit client opt-out is respected and logged.
+4. **Hard budget caps** per virtual key, daily and monthly USD. Rein checks accumulated spend before every upstream fetch; breach returns `402 Payment Required` and the upstream is never called.
+5. **Instant global kill-switch** via `POST /admin/v1/killswitch`. One HTTP call and every `/v1/*` request returns `503 Service Unavailable` with `Retry-After: 60` until someone unfreezes. A single `atomic.Bool` read on the hot path, effectively free when off, instant when on.
+6. **Spend metering** from both JSON and SSE streaming responses, priced against an embedded pricing table verified against OpenAI and Anthropic vendor docs. Dated model snapshots (`claude-opus-4-5-20251101`, `gpt-4o-2024-08-06`) resolve to their base entries automatically.
+7. **Streaming usage auto-inject.** For OpenAI chat completions, Rein injects `stream_options.include_usage: true` into the outbound body so streaming clients cannot silently bypass budget enforcement. An explicit client opt-out is respected and logged.
 
-Supporting machinery:
+Operational foundation:
 
-5. **Virtual keys** (`rein_live_*`) that wrap your real upstream credentials. Clients never see the upstream key. Rotating a compromised credential is one admin API call; old rein tokens keep working until you revoke them.
-6. **Encryption at rest** for the upstream key column using AES-256-GCM. Rein refuses to start without `REIN_ENCRYPTION_KEY`, so plaintext credentials cannot land on disk by accident. Ciphertext carries a `v1:` tag so future algorithm rotations do not require a schema migration.
-7. **Reverse proxy** for OpenAI (`/v1/chat/*`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, `/v1/audio/*`, `/v1/images/*`) and Anthropic (`/v1/messages`). Streaming-aware with pure passthrough. No request body rewriting except the auto-inject described above.
 8. **Durable SQLite keystore** via `modernc.org/sqlite` (pure Go, no CGO). WAL mode enabled. Single static binary deploys anywhere.
-9. **Admin API** for virtual key create, list, revoke, and kill-switch, all protected by a single bearer token compared in constant time.
+9. **Encryption at rest** for the upstream key column using AES-256-GCM. Rein refuses to start without `REIN_ENCRYPTION_KEY`, so plaintext credentials cannot land on disk by accident. Ciphertext carries a `v1:` tag so future algorithm rotations do not require a schema migration.
 
 ## Who this is for
 
 Rein exists specifically for teams who:
 
+- Want a **lightweight reverse proxy** as their first layer in front of direct provider calls, not a refactor target
 - Already call their LLM provider SDK directly and **do not want to refactor to a schema-translation gateway**
 - **Already run an AI gateway of any shape** and want an independent safety net that platform or SRE can trigger without touching the AI team's stack
 - Want a proxy **small enough that their security team can audit it end-to-end in an afternoon**
@@ -58,7 +59,7 @@ Rein exists specifically for teams who:
 - **Ship a dashboard or web UI.** The admin interface is a small HTTP API, driven by `curl` or whatever client your team already uses. Every UI is a supply chain we do not want to own on top of a brake. Full cookbook in [docs/admin-api.md](docs/admin-api.md).
 - **Telemetry.** Rein will never phone home. This is a hard commitment, not a current default.
 
-## Size guarantee
+## Audit-friendly ceiling
 
 Rein is intentionally small. The entire codebase is under 2,000 lines of Go. You can read it end-to-end in an afternoon, and a security review can cover every line. The pricing table is embedded JSON, not Go code, so the codebase stays focused on behavior.
 
@@ -70,7 +71,7 @@ Rein is designed as a **sidecar**, not a replacement. It sits between your appli
 
 | Setup | How Rein fits |
 |---|---|
-| Direct OpenAI / Anthropic SDK calls | Point the SDK's `base_url` at Rein. Two env vars. |
+| Direct SDK calls to any supported provider | Point the SDK's `base_url` at Rein. Two env vars. |
 | AI gateway already in place | Put Rein in front of your existing gateway for an independent kill-switch SRE can trigger without touching the gateway's config. See the [model aliases caveat](#note-on-model-aliases-in-front-end-gateways) below before enabling budgets. |
 | Custom in-house gateway | Rein can sit on either side depending on what you want audited end-to-end. |
 
