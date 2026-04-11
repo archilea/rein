@@ -11,6 +11,10 @@ Rein brakes LLM spend at the edge. It is a small Go reverse proxy that sits betw
 ![Go](https://img.shields.io/badge/go-1.25%2B-00ADD8)
 ![Status](https://img.shields.io/badge/status-alpha-orange)
 
+<br />
+
+<img src="docs/demo.gif" alt="rein kill-switch demo" width="760" />
+
 </div>
 
 ---
