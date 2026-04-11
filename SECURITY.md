@@ -8,7 +8,7 @@ Rein is in alpha. Only the latest release on the `main` branch is supported whil
 
 Please do not open a public issue for security reports.
 
-Email `hello@archilea.com` with:
+Email `security@archilea.com` with:
 
 - a description of the vulnerability
 - steps to reproduce
