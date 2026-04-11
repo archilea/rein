@@ -199,15 +199,16 @@ The full admin surface (kill-switch, virtual keys, health, version) is documente
 
 ## Architecture
 
-```
-┌──────────┐                                 ┌────────┐                                 ┌────────────┐
-│          │  rein_live_* + Bearer           │        │  real upstream key              │            │
-│  Client  │ ───────────────────────────────▶│        │ ───────────────────────────────▶│   OpenAI   │
-│          │                                 │  Rein  │                                 │     or     │
-│ (app,    │ ◀───────────────────────────────│        │ ◀───────────────────────────────│ Anthropic  │
-│ SDK, or  │  response stream                │        │  response + token usage         │            │
-│ gateway) │                                 │        │                                 │            │
-└──────────┘                                 └────────┘                                 └────────────┘
+```mermaid
+flowchart LR
+    Client["Client<br/>(app, SDK,<br/>or gateway)"]
+    Rein["Rein"]
+    Upstream["OpenAI<br/>or<br/>Anthropic"]
+
+    Client -- "rein_live_* + Bearer" --> Rein
+    Rein -- "real upstream key" --> Upstream
+    Upstream -- "response + token usage" --> Rein
+    Rein -- "response stream" --> Client
 ```
 
 Inside Rein, every `/v1/*` request passes through five checks in order:
