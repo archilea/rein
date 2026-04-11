@@ -1,0 +1,94 @@
+name: RFC / design proposal
+description: A feature or architectural change that needs design discussion before code
+title: "[RFC] "
+labels: ["rfc", "proposal", "needs-maintainer-signoff"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not open a PR for this RFC until a maintainer has explicitly signed off on the design.**
+
+        RFCs exist because some changes have real tradeoffs that cannot be decided in a PR review. Filing one means: "I want to discuss this shape before anyone writes code." Fill in every required field honestly. Leaving the open-questions section empty is the most common sign that an issue should be a regular feature request instead of an RFC.
+
+        Rein stays small on purpose. Before you file, re-read `README.md:299` and `README.md:318`.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One paragraph. What would the world look like once this is done?
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why does this matter? What concrete problem does it solve? Name the user, name the pain.
+    validations:
+      required: true
+  - type: textarea
+    id: grounding
+    attributes:
+      label: Grounding
+      description: Point at specific file:line references, roadmap items, or existing discussions that justify this work. If the only justification is "it would be nice," say so honestly.
+      placeholder: |
+        - README.md:310 (roadmap)
+        - internal/meter/meter.go:36 (source comment)
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Non-negotiable constraints
+      description: What about rein must not change? List things like "pure Go, no CGO," "no new runtime dependency," "hot path overhead stays under 30µs," "no outbound telemetry," etc.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Hard dependencies
+      description: Does this require another issue to land first? Does its value depend on how another RFC is ruled? Link them explicitly.
+      placeholder: |
+        - Depends on #17 (durable meter) for persistent state
+        - Subsumed by #20 if Ruling A wins there
+  - type: textarea
+    id: design
+    attributes:
+      label: Proposed direction (open to alternatives in review)
+      description: Sketch your current thinking. Schemas, APIs, file layouts, flow. Mark anything you are not sure about.
+    validations:
+      required: true
+  - type: textarea
+    id: questions
+    attributes:
+      label: Open design questions (must be resolved before coding)
+      description: List every decision a maintainer has to rule on before implementation begins. One bullet per question, with options and your weak preference if you have one. If you cannot list at least one question, this is probably a regular feature request, not an RFC.
+      placeholder: |
+        1. Is this config per-key or global? I weakly prefer per-key because...
+        2. Should errors retry or fail fast?
+    validations:
+      required: true
+  - type: textarea
+    id: first_step
+    attributes:
+      label: Requested first step
+      description: Default is "comment with your reasoning on each open question and wait for maintainer signoff." Override only if you have already done that in the body.
+      value: |
+        1. Read this RFC end-to-end, including any linked issues.
+        2. Post a comment with your preferred answers to each open question, with reasoning.
+        3. Wait for a maintainer to sign off before opening a PR.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Tentative acceptance criteria
+      description: How will we know the implementation is done, once the design is locked? These are allowed to shift during discussion.
+    validations:
+      required: true
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope
+      description: What are you explicitly NOT proposing? This protects the RFC from scope creep during discussion.
+    validations:
+      required: true
