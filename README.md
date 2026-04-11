@@ -347,8 +347,16 @@ Staying narrow is the product. If Rein grew a dashboard, a routing layer, or a p
 
 ---
 
+## Contributors
+
+<a href="https://github.com/archilea/rein/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=archilea/rein" alt="Rein contributors" />
+</a>
+
+---
+
 <div align="center">
 
-*Built with intent by [Archilea](https://archilea.com).*
+*Maintained by [Archilea](https://archilea.com) and contributors.*
 
 </div>
