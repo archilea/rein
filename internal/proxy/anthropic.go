@@ -25,17 +25,19 @@ import (
 // non-streaming JSON responses it parses the usage field, computes USD cost
 // via the supplied Pricer, and records the spend via the Meter.
 type Anthropic struct {
-	base            *url.URL
-	rp              *httputil.ReverseProxy
-	meter           meter.Meter
-	pricer          *meter.Pricer
+	base  *url.URL
+	rp    *httputil.ReverseProxy
+	meter meter.Meter
+	// pricerHolder: same reason as OpenAI.pricerHolder — hot-swappable
+	// pricing snapshot for #25, lock-free atomic read on the hot path.
+	pricerHolder    *meter.PricerHolder
 	unknownModelLog *unknownModelLogger
 }
 
 // NewAnthropic creates an Anthropic adapter that forwards to base
-// (for example, "https://api.anthropic.com"). meter and pricer may be nil to
-// disable metering.
-func NewAnthropic(base string, m meter.Meter, pricer *meter.Pricer) (*Anthropic, error) {
+// (for example, "https://api.anthropic.com"). meter and pricerHolder may
+// be nil to disable metering.
+func NewAnthropic(base string, m meter.Meter, pricerHolder *meter.PricerHolder) (*Anthropic, error) {
 	u, err := url.Parse(base)
 	if err != nil {
 		return nil, fmt.Errorf("parse anthropic base url %q: %w", base, err)
@@ -47,7 +49,7 @@ func NewAnthropic(base string, m meter.Meter, pricer *meter.Pricer) (*Anthropic,
 	a := &Anthropic{
 		base:            u,
 		meter:           m,
-		pricer:          pricer,
+		pricerHolder:    pricerHolder,
 		unknownModelLog: newUnknownModelLogger(),
 	}
 	a.rp = &httputil.ReverseProxy{
@@ -159,7 +161,7 @@ func (a *Anthropic) modifyResponse(resp *http.Response) error {
 // and a running output_tokens in each message_delta; the last message_delta
 // carries the final total.
 func (a *Anthropic) wrapStream(resp *http.Response) {
-	if a.meter == nil || a.pricer == nil {
+	if a.meter == nil || a.pricerHolder == nil {
 		return
 	}
 	vk := VKeyFromContext(resp.Request.Context())
@@ -176,10 +178,14 @@ func (a *Anthropic) wrapStream(resp *http.Response) {
 }
 
 func (a *Anthropic) recordSpend(ctx context.Context, keyID, model string, inputTokens, outputTokens int) {
-	if a.meter == nil || a.pricer == nil {
+	if a.meter == nil || a.pricerHolder == nil {
 		return
 	}
-	cost, ok := a.pricer.Cost(keys.UpstreamAnthropic, model, inputTokens, outputTokens)
+	pricer := a.pricerHolder.Load()
+	if pricer == nil {
+		return
+	}
+	cost, ok := pricer.Cost(keys.UpstreamAnthropic, model, inputTokens, outputTokens)
 	if !ok {
 		a.unknownModelLog.Warn("anthropic", keyID, model)
 		return

@@ -74,12 +74,12 @@ type Proxy struct {
 //
 // meter and pricer may be nil, in which case per-key budgets and spend
 // recording are disabled. Production wiring always provides both.
-func New(store keys.Store, killSwitch killswitch.Switch, m meter.Meter, pricer *meter.Pricer, openaiBase, anthropicBase string) (*Proxy, error) {
-	oai, err := NewOpenAI(openaiBase, m, pricer)
+func New(store keys.Store, killSwitch killswitch.Switch, m meter.Meter, pricerHolder *meter.PricerHolder, openaiBase, anthropicBase string) (*Proxy, error) {
+	oai, err := NewOpenAI(openaiBase, m, pricerHolder)
 	if err != nil {
 		return nil, err
 	}
-	ant, err := NewAnthropic(anthropicBase, m, pricer)
+	ant, err := NewAnthropic(anthropicBase, m, pricerHolder)
 	if err != nil {
 		return nil, err
 	}

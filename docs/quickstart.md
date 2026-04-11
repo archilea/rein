@@ -117,9 +117,89 @@ The `upstream_base_url` convention is **"everything up to but not including the 
 | xAI Grok | `https://api.x.ai` |
 | Local vLLM / Ollama / LocalAI | `http://127.0.0.1:11434` |
 
-Rein normalizes the URL at create time. `https` is required for non-loopback hosts, loopback `http` is accepted for local providers, query strings and fragments are rejected, and a trailing slash on the path is stripped. The same key still uses the embedded pricing table. Provider-specific models that are not in the table log a loud WARN line ("model not in pricing table; spend not recorded") the first time they are seen and rate-limit to once per minute after the initial burst, so operators discover gaps immediately rather than at the end of the month. Operator-editable pricing overrides are tracked in issue #25. Anthropic-compatible providers are not supported in 0.2.
+Rein normalizes the URL at create time. `https` is required for non-loopback hosts, loopback `http` is accepted for local providers, query strings and fragments are rejected, and a trailing slash on the path is stripped. The same key still uses the embedded pricing table. Provider-specific models that are not in the table log a loud WARN line ("model not in pricing table; spend not recorded") the first time they are seen and rate-limit to once per minute after the initial burst, so operators discover gaps immediately rather than at the end of the month. Anthropic-compatible providers are not supported in 0.2.
 
 Azure OpenAI is not supported via this override because it uses a deployment-keyed path shape (`/openai/deployments/{deployment}/chat/completions?api-version=...`) that does not fit a base URL override; a dedicated Azure adapter is tracked separately.
+
+## 3b. Add pricing for a provider-specific model
+
+Rein ships with an embedded pricing table covering OpenAI and Anthropic models. When you point a key at Groq, Fireworks, or another OpenAI-compatible provider, the models those providers serve (for example `llama-3.3-70b-versatile`) are **not in the embedded table**, so the unknown-model WARN fires and spend is not recorded for that request. Budgets on that key therefore do not trigger on spend alone — they become observability-only until the model is priced.
+
+The operator-editable pricing file fixes that without a Rein release. Create a `rein.json`, make it available to the process, and Rein merges your entries on top of the embedded table at startup. The file can be reloaded at runtime with `SIGHUP` (or an optional background poll on Kubernetes deployments that prefer ConfigMap file-watching).
+
+**Rein resolves the config file path in this order**:
+
+1. If `REIN_CONFIG_FILE` is set, use it.
+2. Otherwise if `/etc/rein/rein.json` exists, use it (**no env var needed for Kubernetes ConfigMap mounts at this path**).
+3. Otherwise run zero-config against the embedded table only.
+
+The startup log records which rule fired (`source=env_var`, `source=default_path`, or `source=embedded_only`) so the active source is visible in the first few lines of output.
+
+Minimal `rein.json`:
+
+```json
+{
+  "version": "1",
+  "source": "operator notes, optional",
+  "fetched_at": "2026-04-11",
+  "models": {
+    "openai": {
+      "llama-3.3-70b-versatile": { "input_per_mtok": 0.59, "output_per_mtok": 0.79 },
+      "deepseek-v3":             { "input_per_mtok": 0.14, "output_per_mtok": 0.28 }
+    }
+  }
+}
+```
+
+A few things to know:
+
+- The outer key is always `"openai"` even for Groq or DeepSeek models. The pricer's axis matches Rein's adapter (wire protocol), not the vendor brand — and every OpenAI-compatible provider rides the OpenAI adapter per [Section 3a](#3a-point-a-key-at-an-openai-compatible-provider).
+- **Prices are per million tokens in USD**, matching the embedded `internal/meter/pricing.json` exactly. An operator can copy that file as a starting point and edit it.
+- **Zero prices are allowed** (free tiers, local-hosted models) and log an INFO line per zero entry so you can tell at a glance which models you have priced to zero.
+- Validation is **strict all-or-nothing**: a single entry with a negative price rejects the whole file. A failed reload at runtime logs an ERROR and keeps the previous snapshot active — a bad config cannot take down a running process.
+- **Mount the file into the container**. Do not bake it into the image — that defeats the point of hot-reload. On Docker: `-v $(pwd)/rein.json:/etc/rein/rein.json:ro`. On Kubernetes: mount a ConfigMap at `/etc/rein/rein.json` and omit any `REIN_CONFIG_FILE` env var — the hybrid resolution picks up the default path automatically.
+
+Run with a pricing override file (the env var is optional — the default path is enough):
+
+```bash
+docker run -d --name rein -p 8080:8080 \
+  -e REIN_ADMIN_TOKEN="$(openssl rand -hex 32)" \
+  -e REIN_ENCRYPTION_KEY="$(openssl rand -hex 32)" \
+  -v "$(pwd)/rein.json:/etc/rein/rein.json:ro" \
+  ghcr.io/archilea/rein:latest
+```
+
+Equivalent Kubernetes snippet (no env var, ConfigMap mounted at the default path):
+
+```yaml
+volumes:
+  - name: rein-pricing
+    configMap:
+      name: rein-pricing
+volumeMounts:
+  - name: rein-pricing
+    mountPath: /etc/rein
+    readOnly: true
+# No REIN_CONFIG_FILE env var needed — Rein picks up /etc/rein/rein.json
+# via the default-path rule.
+```
+
+Reload after editing the file:
+
+```bash
+# bare metal
+kill -HUP $(pidof rein)
+
+# Docker
+docker kill --signal=HUP rein
+
+# systemd
+systemctl reload rein
+```
+
+Rein emits an `INFO config reload succeeded` log line with the new model count on success, or `ERROR config reload failed, keeping previous snapshot active` with the error and the active snapshot's model count on failure. The previous snapshot stays active across a failed reload by design — you can fix the file and send another SIGHUP.
+
+For Kubernetes deployments where sending signals to a pod requires `kubectl exec`, set `REIN_CONFIG_POLL_INTERVAL=30s` and Rein will check the file's mtime on that cadence and reload on change. The poll must be between `1s` and `1h` (inclusive); anything outside that range is a fatal startup error. Editor-safe: file-rename on save (vim, emacs) is handled correctly because Rein re-stats the path each tick rather than holding a file descriptor across reloads.
 
 ## 4. Freeze in an incident
 

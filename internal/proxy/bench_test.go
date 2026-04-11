@@ -107,7 +107,7 @@ func benchSetupOverride(b *testing.B, useSQLite, withBudget bool, upstream *http
 	if err != nil {
 		b.Fatal(err)
 	}
-	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), pricer, proxyOpenAIBase, "https://api.anthropic.com")
+	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), meter.NewPricerHolder(pricer), proxyOpenAIBase, "https://api.anthropic.com")
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func BenchmarkRein_Frozen(b *testing.B) {
 	_ = ks.SetFrozen(context.Background(), true)
 
 	pricer, _ := meter.LoadPricer()
-	p, _ := New(store, ks, meter.NewMemory(), pricer, up.URL, "https://api.anthropic.com")
+	p, _ := New(store, ks, meter.NewMemory(), meter.NewPricerHolder(pricer), up.URL, "https://api.anthropic.com")
 	rein := httptest.NewServer(p)
 	b.Cleanup(rein.Close)
 

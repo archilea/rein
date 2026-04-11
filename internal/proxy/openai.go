@@ -27,10 +27,14 @@ import (
 // Streaming responses (Content-Type: text/event-stream) are passed through
 // unmodified. Streaming token extraction is tracked as a follow-up.
 type OpenAI struct {
-	base   *url.URL
-	rp     *httputil.ReverseProxy
-	meter  meter.Meter
-	pricer *meter.Pricer
+	base  *url.URL
+	rp    *httputil.ReverseProxy
+	meter meter.Meter
+	// pricerHolder wraps the currently active *Pricer so operator-editable
+	// pricing overrides (#25) can hot-swap the pricing table on SIGHUP
+	// without taking a lock on the request hot path. Reads are a single
+	// atomic pointer load. May be nil in tests that disable metering.
+	pricerHolder *meter.PricerHolder
 	// baseURLCache memoizes per-key upstream_base_url overrides as parsed
 	// *url.URL pointers keyed by the raw string form. This keeps the hot
 	// path to a single sync.Map.Load on cache hit and a one-time parse per
@@ -46,8 +50,11 @@ type OpenAI struct {
 }
 
 // NewOpenAI creates an OpenAI adapter that forwards to base (for example,
-// "https://api.openai.com"). meter and pricer may be nil to disable metering.
-func NewOpenAI(base string, m meter.Meter, pricer *meter.Pricer) (*OpenAI, error) {
+// "https://api.openai.com"). meter and pricerHolder may be nil to disable
+// metering. The pricerHolder indirection replaces the previous direct
+// *Pricer reference (#25) so operator-editable pricing overrides can swap
+// the active pricing table at runtime without a restart.
+func NewOpenAI(base string, m meter.Meter, pricerHolder *meter.PricerHolder) (*OpenAI, error) {
 	u, err := url.Parse(base)
 	if err != nil {
 		return nil, fmt.Errorf("parse openai base url %q: %w", base, err)
@@ -59,7 +66,7 @@ func NewOpenAI(base string, m meter.Meter, pricer *meter.Pricer) (*OpenAI, error
 	o := &OpenAI{
 		base:            u,
 		meter:           m,
-		pricer:          pricer,
+		pricerHolder:    pricerHolder,
 		unknownModelLog: newUnknownModelLogger(),
 	}
 	o.rp = &httputil.ReverseProxy{
@@ -255,7 +262,7 @@ func (o *OpenAI) modifyResponse(resp *http.Response) error {
 // a background context so an early client disconnect does not cancel the
 // meter write.
 func (o *OpenAI) wrapStream(resp *http.Response) {
-	if o.meter == nil || o.pricer == nil {
+	if o.meter == nil || o.pricerHolder == nil {
 		return
 	}
 	vk := VKeyFromContext(resp.Request.Context())
@@ -273,12 +280,19 @@ func (o *OpenAI) wrapStream(resp *http.Response) {
 
 // recordSpend looks up USD cost via the pricer and adds it to the key's
 // spend bucket. Silent on unknown models (logged, but not an error) so a
-// newly released model does not break the pipeline.
+// newly released model does not break the pipeline. The pricer is loaded
+// via a single atomic pointer read from pricerHolder so operator-editable
+// pricing overrides (#25) can hot-swap the active snapshot without any
+// lock on the hot path.
 func (o *OpenAI) recordSpend(ctx context.Context, keyID, model string, inputTokens, outputTokens int) {
-	if o.meter == nil || o.pricer == nil {
+	if o.meter == nil || o.pricerHolder == nil {
 		return
 	}
-	cost, ok := o.pricer.Cost(keys.UpstreamOpenAI, model, inputTokens, outputTokens)
+	pricer := o.pricerHolder.Load()
+	if pricer == nil {
+		return
+	}
+	cost, ok := pricer.Cost(keys.UpstreamOpenAI, model, inputTokens, outputTokens)
 	if !ok {
 		o.unknownModelLog.Warn("openai", keyID, model)
 		return

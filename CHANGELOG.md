@@ -9,6 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Operator-editable pricing overrides with hot reload** (#25). A new
+  `rein.json` config file resolved via the hybrid rule — env var
+  `REIN_CONFIG_FILE` wins if set, otherwise `/etc/rein/rein.json`
+  (the default path, picked up automatically in K8s ConfigMap
+  deployments without any env var boilerplate), otherwise run
+  zero-config against the embedded table. Startup log records which
+  rule fired (`source=env_var|default_path|embedded_only`). The file's
+  `models` block merges on top of the embedded pricing table:
+  override entries win for the same `(upstream, model)` pair; new
+  pairs are added. Enables honest budget enforcement and spend
+  recording for every OpenAI-compatible provider unlocked by #24
+  (Groq, Fireworks, OpenRouter, DeepSeek, xAI Grok, and any future
+  entrant) without a Rein release — operators add the model prices
+  in their own file and reload. Zero-config default is unchanged: if
+  neither the env var nor the default path is set, Rein uses just the
+  embedded table, bit-for-bit identical to pre-0.2 behavior.
+
+  Reload triggers: **SIGHUP** (always on when `REIN_CONFIG_FILE` is set;
+  operators run `kill -HUP $(pidof rein)`, `docker kill --signal=HUP
+  rein`, or `systemctl reload rein`) and an **optional background poll**
+  via `REIN_CONFIG_POLL_INTERVAL` (opt-in for Kubernetes ConfigMap
+  deployments; bounded to `[1s, 1h]`, rejected outside that range at
+  startup). Both triggers share the same load-and-swap path so their
+  failure and success behavior are identical by construction.
+
+  Hot-path safety: the active `*Pricer` is wrapped in a new
+  `meter.PricerHolder` that uses `atomic.Pointer[Pricer]` for
+  publication. Adapters (`NewOpenAI` / `NewAnthropic`) take
+  `*PricerHolder` instead of `*Pricer`; every response-side `recordSpend`
+  call does one lock-free atomic load before resolving the price.
+  Micro-benchmark shows the indirection is **10.3 ns/op vs 10.4 ns/op**
+  for the direct path — within measurement noise, zero allocations on
+  either path. Full SQLite+budget hot-path benchmark (~33.5 µs) is
+  unchanged across the swap.
+
+  Validation: strict all-or-nothing. File must parse as JSON, `version`
+  must be `"1"` (or empty, defaults to 1), every `input_per_mtok` and
+  `output_per_mtok` must be `>= 0`. Zero prices are allowed (free tiers,
+  local-hosted models) and log an INFO line per zero entry so operators
+  can tell at a glance what they shipped. A bad reload logs ERROR,
+  includes the active snapshot's model count, and keeps the previous
+  snapshot active — a bad config cannot take down a running process.
+
+  Version mismatch is asymmetric: **fatal at startup**, **warn-and-keep
+  previous snapshot** on reload. An unknown future schema version on
+  `kill -HUP` does not crash an operator's production process.
+
+  File format documented in `docs/quickstart.md` section 3b with a Groq
+  example, the correct SIGHUP / docker kill / systemctl commands, and
+  the Kubernetes poll-interval guidance. Mount the file into the
+  container; do not bake it into the image.
+
 - **Per-key upstream base URL override** (#24). A virtual key can now
   carry an `upstream_base_url` that replaces the global `REIN_OPENAI_BASE`
   for that key's requests. Unlocks any OpenAI-compatible provider (Groq,
