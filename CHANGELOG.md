@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Public positioning.** Reframed as "a modern, lightweight reverse proxy for LLMs" (previously "a small, boring cost and safety brake for LLM API traffic"). No scope change: the same five "deliberately does not do" constraints still hold.
+- **Audit-friendly ceiling** (#39). Replaced the "under 2,000 lines of Go" public guarantee with CI-enforced internal design disciplines: a ceiling on direct non-stdlib dependencies, a ceiling on compiled production modules, and a ceiling on compressed amd64 image size. The specific thresholds live as grep-able literals in `.github/workflows/ci.yml` so every budget change is visible in `git log` on that file. The README now publishes the current state as of each release (1 direct dep, 10 compiled modules, ~12 MB compressed) as transparency, not as a public SLA, so future releases that legitimately move these numbers can evolve without a messy public renegotiation. Source LOC stays as an internal design forcing-function but is no longer pinned in docs. No scope change and no code in `internal/` or `cmd/` touched; only README, CHANGELOG, and the CI workflow changed.
 
 ### Planned for 0.2
 
