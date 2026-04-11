@@ -87,6 +87,40 @@ resp = client.chat.completions.create(
 
 That is it. Rein transparently forwards the request, parses token usage from the response, and enforces the per-key USD budget before the next upstream call.
 
+## 3a. Point a key at an OpenAI-compatible provider
+
+Most "famous" LLM providers outside OpenAI and Anthropic (Groq, Together, Fireworks, DeepSeek, xAI Grok, OpenRouter, Perplexity, Cerebras, and local vLLM / Ollama / LocalAI) speak the exact OpenAI wire protocol. Rein can reach any of them via the existing OpenAI adapter by overriding the upstream base URL on a per-key basis. No new adapter, no process-wide reconfiguration, no separate Rein instance.
+
+```bash
+curl -X POST http://localhost:8080/admin/v1/keys \
+  -H "Authorization: Bearer $REIN_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "groq-prod",
+    "upstream": "openai",
+    "upstream_key": "gsk_real_groq_key",
+    "upstream_base_url": "https://api.groq.com/openai",
+    "daily_budget_usd": 25
+  }'
+```
+
+The `upstream_base_url` convention is **"everything up to but not including the `/v1/` segment"** that Rein prepends on every outbound request. Many OpenAI-compatible providers mount their API under a path prefix, so you include that prefix in the base URL:
+
+| Provider | `upstream_base_url` |
+|---|---|
+| OpenAI (default, no override needed) | `https://api.openai.com` |
+| Groq | `https://api.groq.com/openai` |
+| OpenRouter | `https://openrouter.ai/api` |
+| Fireworks | `https://api.fireworks.ai/inference` |
+| Together | `https://api.together.xyz` |
+| DeepSeek | `https://api.deepseek.com` |
+| xAI Grok | `https://api.x.ai` |
+| Local vLLM / Ollama / LocalAI | `http://127.0.0.1:11434` |
+
+Rein normalizes the URL at create time. `https` is required for non-loopback hosts, loopback `http` is accepted for local providers, query strings and fragments are rejected, and a trailing slash on the path is stripped. The same key still uses the embedded pricing table. Provider-specific models that are not in the table log a loud WARN line ("model not in pricing table; spend not recorded") the first time they are seen and rate-limit to once per minute after the initial burst, so operators discover gaps immediately rather than at the end of the month. Operator-editable pricing overrides are tracked in issue #25. Anthropic-compatible providers are not supported in 0.2.
+
+Azure OpenAI is not supported via this override because it uses a deployment-keyed path shape (`/openai/deployments/{deployment}/chat/completions?api-version=...`) that does not fit a base URL override; a dedicated Azure adapter is tracked separately.
+
 ## 4. Freeze in an incident
 
 ```bash

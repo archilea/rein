@@ -285,6 +285,145 @@ func TestAdmin_RevokeKey_InvalidFormat(t *testing.T) {
 	}
 }
 
+func TestAdmin_CreateKey_WithUpstreamBaseURL(t *testing.T) {
+	_, _, store, mux := newTestServer(t)
+
+	body := `{"name":"groq","upstream":"openai","upstream_key":"gsk-real","upstream_base_url":"https://api.groq.com/"}`
+	rec := postAuthed(t, mux, "/admin/v1/keys", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status: got %d want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp createKeyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.UpstreamBaseURL != "https://api.groq.com" {
+		t.Errorf("upstream_base_url in response: got %q want canonical form https://api.groq.com", resp.UpstreamBaseURL)
+	}
+
+	vk, err := store.GetByToken(context.Background(), resp.Token)
+	if err != nil {
+		t.Fatalf("store lookup: %v", err)
+	}
+	if vk.UpstreamBaseURL != "https://api.groq.com" {
+		t.Errorf("upstream_base_url in store: got %q want https://api.groq.com", vk.UpstreamBaseURL)
+	}
+}
+
+func TestAdmin_CreateKey_UpstreamBaseURLRejectsAnthropic(t *testing.T) {
+	_, _, _, mux := newTestServer(t)
+
+	body := `{"name":"x","upstream":"anthropic","upstream_key":"sk-ant","upstream_base_url":"https://api.example.com"}`
+	rec := postAuthed(t, mux, "/admin/v1/keys", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d want 400", rec.Code)
+	}
+
+	var env apiError
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode envelope: %v; body=%s", err, rec.Body.String())
+	}
+	if env.Error.Code != keys.ErrCodeInvalidBaseURL {
+		t.Errorf("envelope code: got %q want %q", env.Error.Code, keys.ErrCodeInvalidBaseURL)
+	}
+}
+
+func TestAdmin_CreateKey_InvalidUpstreamBaseURL(t *testing.T) {
+	_, _, _, mux := newTestServer(t)
+
+	cases := []struct {
+		name     string
+		url      string
+		wantCode string
+	}{
+		{"non-loopback http", "http://api.example.com", keys.ErrCodeInvalidBaseURLScheme},
+		{"ftp scheme", "ftp://api.example.com", keys.ErrCodeInvalidBaseURLScheme},
+		{"query included", "https://api.example.com?foo=bar", keys.ErrCodeInvalidBaseURLQuery},
+		{"fragment included", "https://api.example.com#f", keys.ErrCodeInvalidBaseURLFragment},
+		{"userinfo included", "https://user:pass@api.example.com", keys.ErrCodeInvalidBaseURLHost},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"name":"x","upstream":"openai","upstream_key":"sk-x","upstream_base_url":"` + tc.url + `"}`
+			rec := postAuthed(t, mux, "/admin/v1/keys", body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status: got %d want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			var env apiError
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode envelope: %v; body=%s", err, rec.Body.String())
+			}
+			if env.Error.Code != tc.wantCode {
+				t.Errorf("envelope code: got %q want %q", env.Error.Code, tc.wantCode)
+			}
+			if env.Error.Message == "" {
+				t.Errorf("envelope message should be non-empty")
+			}
+		})
+	}
+}
+
+func TestAdmin_CreateKey_UpstreamBaseURLWithPathPrefix(t *testing.T) {
+	// Real OpenAI-compatible providers (Groq at /openai, OpenRouter at
+	// /api, Fireworks at /inference) mount under a path prefix. The
+	// validator accepts a non-empty path, and httputil.ProxyRequest.SetURL
+	// joins the base path with the incoming /v1/... so routing works with
+	// no adapter change.
+	_, _, store, mux := newTestServer(t)
+
+	body := `{"name":"groq-prefix","upstream":"openai","upstream_key":"gsk-real","upstream_base_url":"https://api.groq.com/openai/"}`
+	rec := postAuthed(t, mux, "/admin/v1/keys", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status: got %d want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp createKeyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.UpstreamBaseURL != "https://api.groq.com/openai" {
+		t.Errorf("canonical form with path: got %q want https://api.groq.com/openai", resp.UpstreamBaseURL)
+	}
+	vk, err := store.GetByToken(context.Background(), resp.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vk.UpstreamBaseURL != "https://api.groq.com/openai" {
+		t.Errorf("stored path: got %q want https://api.groq.com/openai", vk.UpstreamBaseURL)
+	}
+}
+
+func TestAdmin_CreateKey_LoopbackHTTPAccepted(t *testing.T) {
+	_, _, _, mux := newTestServer(t)
+	body := `{"name":"local","upstream":"openai","upstream_key":"sk-local","upstream_base_url":"http://127.0.0.1:11434"}`
+	rec := postAuthed(t, mux, "/admin/v1/keys", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status: got %d want 201; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdmin_CreateKey_OmittedBaseURLStaysEmpty(t *testing.T) {
+	_, _, store, mux := newTestServer(t)
+	body := `{"name":"plain","upstream":"openai","upstream_key":"sk-plain"}`
+	rec := postAuthed(t, mux, "/admin/v1/keys", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status: got %d want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp createKeyResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.UpstreamBaseURL != "" {
+		t.Errorf("omitted base url in response: got %q want empty", resp.UpstreamBaseURL)
+	}
+	vk, err := store.GetByToken(context.Background(), resp.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vk.UpstreamBaseURL != "" {
+		t.Errorf("omitted base url in store: got %q want empty", vk.UpstreamBaseURL)
+	}
+}
+
 func TestAdmin_Keys_RequireAuth(t *testing.T) {
 	_, _, _, mux := newTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/admin/v1/keys", nil)

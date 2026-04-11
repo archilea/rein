@@ -67,6 +67,15 @@ func buildStore(b *testing.B, useSQLite bool) keys.Store {
 
 func benchSetup(b *testing.B, useSQLite, withBudget bool, upstream *httptest.Server) (string, string) {
 	b.Helper()
+	return benchSetupOverride(b, useSQLite, withBudget, upstream, "")
+}
+
+// benchSetupOverride variant lets a benchmark mint a test key with an
+// explicit UpstreamBaseURL, so BenchmarkRein_PerKeyBaseURLOverride_*
+// can isolate the hot-path cost of the #24 override branch against
+// the default benchmarks.
+func benchSetupOverride(b *testing.B, useSQLite, withBudget bool, upstream *httptest.Server, baseURLOverride string) (string, string) {
+	b.Helper()
 	store := buildStore(b, useSQLite)
 
 	id, _ := keys.GenerateID()
@@ -74,7 +83,8 @@ func benchSetup(b *testing.B, useSQLite, withBudget bool, upstream *httptest.Ser
 	vk := &keys.VirtualKey{
 		ID: id, Token: token, Name: "bench",
 		Upstream: keys.UpstreamOpenAI, UpstreamKey: "sk-fake",
-		CreatedAt: time.Now().UTC(),
+		UpstreamBaseURL: baseURLOverride,
+		CreatedAt:       time.Now().UTC(),
 	}
 	if withBudget {
 		vk.DailyBudgetUSD = 1_000_000
@@ -84,11 +94,20 @@ func benchSetup(b *testing.B, useSQLite, withBudget bool, upstream *httptest.Ser
 		b.Fatal(err)
 	}
 
+	// When the benchmark key carries an override, the proxy's "global"
+	// upstream base URL is irrelevant for that key; pass a known-bad
+	// placeholder so the benchmark fails loudly if the override is ever
+	// silently ignored.
+	proxyOpenAIBase := upstream.URL
+	if baseURLOverride != "" {
+		proxyOpenAIBase = "http://127.0.0.1:1"
+	}
+
 	pricer, err := meter.LoadPricer()
 	if err != nil {
 		b.Fatal(err)
 	}
-	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), pricer, upstream.URL, "https://api.anthropic.com")
+	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), pricer, proxyOpenAIBase, "https://api.anthropic.com")
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -161,6 +180,18 @@ func BenchmarkRein_SQLite_WithBudget_ZeroLatency(b *testing.B) {
 	up := mockUpstream()
 	b.Cleanup(up.Close)
 	url, tok := benchSetup(b, true, true, up)
+	drive200(b, url, tok)
+}
+
+// Full production hot path with a per-key upstream_base_url override set
+// (#24). The extra work vs BenchmarkRein_SQLite_WithBudget_ZeroLatency is
+// one sync.Map.Load on the cached *url.URL pointer, expected to be in the
+// single-digit nanoseconds range. A regression here means the override
+// cache is not doing its job.
+func BenchmarkRein_SQLite_WithBudget_PerKeyOverride_ZeroLatency(b *testing.B) {
+	up := mockUpstream()
+	b.Cleanup(up.Close)
+	url, tok := benchSetupOverride(b, true, true, up, up.URL)
 	drive200(b, url, tok)
 }
 
