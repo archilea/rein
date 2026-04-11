@@ -66,7 +66,7 @@ Rein is intentionally small. A security review can cover every line in an aftern
 **Current state**, as of the latest release:
 
 - **1 direct non-stdlib dependency** (`modernc.org/sqlite`)
-- **10 compiled production modules** (measured with `go list -deps ./cmd/rein`, excluding stdlib and test-only deps)
+- **8 compiled production modules** (measured with `go list -deps ./cmd/rein` on Linux, excluding stdlib and test-only deps)
 - **~12 MB compressed amd64 image**
 
 If those numbers change materially in a future release, the `CHANGELOG.md` entry for that release will say why. The specific CI thresholds live in `.github/workflows/ci.yml` as grep-able literals so the history of every budget change is visible in `git log` on that file.
