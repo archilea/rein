@@ -20,11 +20,8 @@ import (
 // OpenAI is a reverse-proxy handler for OpenAI-compatible endpoints.
 //
 // It forwards requests to the configured base URL (https://api.openai.com by default),
-// and for non-streaming JSON responses it parses the `usage` field, computes
-// the USD cost via the supplied Pricer, and records the spend via the Meter.
-//
-// Streaming responses (Content-Type: text/event-stream) are passed through
-// unmodified. Streaming token extraction is tracked as a follow-up.
+// and for both non-streaming JSON and streaming (SSE) responses it parses the
+// usage/token counts, computes the USD cost via the Pricer, and records spend.
 type OpenAI struct {
 	base   *url.URL
 	rp     *httputil.ReverseProxy

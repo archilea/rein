@@ -4,7 +4,9 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"strconv"
 )
 
 // Config holds Rein's runtime settings.
@@ -18,10 +20,16 @@ type Config struct {
 }
 
 // Load reads configuration from environment variables.
-// It returns an error if any required variable is missing.
+// It returns an error if any required variable is missing or if REIN_PORT is invalid.
 func Load() (*Config, error) {
+	port := getenv("REIN_PORT", "8080")
+	p, err := strconv.Atoi(port)
+	if err != nil || p < 1 || p > 65535 {
+		return nil, fmt.Errorf("invalid REIN_PORT %q: must be a numeric port between 1 and 65535", port)
+	}
+
 	cfg := &Config{
-		Port:          getenv("REIN_PORT", "8080"),
+		Port:          port,
 		AdminToken:    os.Getenv("REIN_ADMIN_TOKEN"),
 		DatabaseURL:   getenv("REIN_DB_URL", "sqlite:./rein.db"),
 		EncryptionKey: os.Getenv("REIN_ENCRYPTION_KEY"),
