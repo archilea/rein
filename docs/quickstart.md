@@ -87,6 +87,27 @@ resp = client.chat.completions.create(
 
 That is it. Rein transparently forwards the request, parses token usage from the response, and enforces the per-key USD budget before the next upstream call.
 
+## 3a. Point a key at an OpenAI-compatible provider
+
+Most "famous" LLM providers outside OpenAI and Anthropic (Groq, Together, Fireworks, DeepSeek, xAI Grok, OpenRouter, Perplexity, Cerebras, and local vLLM / Ollama / LocalAI) speak the exact OpenAI wire protocol. Rein can reach any of them via the existing OpenAI adapter by overriding the upstream base URL on a per-key basis. No new adapter, no process-wide reconfiguration, no separate Rein instance.
+
+```bash
+curl -X POST http://localhost:8080/admin/v1/keys \
+  -H "Authorization: Bearer $REIN_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "groq-prod",
+    "upstream": "openai",
+    "upstream_key": "gsk_real_groq_key",
+    "upstream_base_url": "https://api.groq.com",
+    "daily_budget_usd": 25
+  }'
+```
+
+Rein normalizes the URL at create time. Only `scheme + host + optional port` is accepted, `https` is required for non-loopback hosts, and path, query, and fragment are rejected up front. For local vLLM / Ollama / LocalAI on the same machine, `http://127.0.0.1:11434` and `http://localhost:11434` are both accepted because the host is loopback. The same key still uses the embedded pricing table. Provider-specific models that are not in the table log a loud WARN line ("model not in pricing table; spend not recorded") the first time they are seen and rate-limit to once per minute after the initial burst, so operators discover gaps immediately rather than at the end of the month. Operator-editable pricing overrides are tracked in issue #25. Anthropic-compatible providers are not supported in 0.2.
+
+Azure OpenAI is not supported via this override because it uses a deployment-keyed path shape (`/openai/deployments/{deployment}/chat/completions?api-version=...`) that does not fit a base URL override; a dedicated Azure adapter is tracked separately.
+
 ## 4. Freeze in an incident
 
 ```bash

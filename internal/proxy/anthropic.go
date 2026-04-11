@@ -25,10 +25,11 @@ import (
 // non-streaming JSON responses it parses the usage field, computes USD cost
 // via the supplied Pricer, and records the spend via the Meter.
 type Anthropic struct {
-	base   *url.URL
-	rp     *httputil.ReverseProxy
-	meter  meter.Meter
-	pricer *meter.Pricer
+	base            *url.URL
+	rp              *httputil.ReverseProxy
+	meter           meter.Meter
+	pricer          *meter.Pricer
+	unknownModelLog *unknownModelLogger
 }
 
 // NewAnthropic creates an Anthropic adapter that forwards to base
@@ -43,7 +44,12 @@ func NewAnthropic(base string, m meter.Meter, pricer *meter.Pricer) (*Anthropic,
 		return nil, fmt.Errorf("anthropic base url must include scheme and host, got %q", base)
 	}
 
-	a := &Anthropic{base: u, meter: m, pricer: pricer}
+	a := &Anthropic{
+		base:            u,
+		meter:           m,
+		pricer:          pricer,
+		unknownModelLog: newUnknownModelLogger(),
+	}
 	a.rp = &httputil.ReverseProxy{
 		Rewrite:        a.rewrite,
 		ModifyResponse: a.modifyResponse,
@@ -63,6 +69,14 @@ func (a *Anthropic) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Anthropic uses x-api-key (not Authorization Bearer) and requires the
 // anthropic-version header. The inbound Authorization header is stripped
 // regardless to avoid leaking rein tokens upstream.
+//
+// Note: per-key upstream_base_url override (#24) is intentionally NOT
+// honored on the Anthropic adapter because there are no known
+// Anthropic-compatible third-party providers. A VirtualKey carrying a
+// non-empty UpstreamBaseURL against Upstream == anthropic is silently
+// ignored here; the admin handler rejects this combination at create
+// time, and TestOpenAI_OverrideAnthropicAdapterNotAffected pins the
+// runtime behavior. Revisit if a real use case appears.
 func (a *Anthropic) rewrite(r *httputil.ProxyRequest) {
 	r.SetURL(a.base)
 	r.Out.Host = a.base.Host
@@ -167,7 +181,7 @@ func (a *Anthropic) recordSpend(ctx context.Context, keyID, model string, inputT
 	}
 	cost, ok := a.pricer.Cost(keys.UpstreamAnthropic, model, inputTokens, outputTokens)
 	if !ok {
-		slog.Warn("anthropic model not in pricing table; spend not recorded", "model", model)
+		a.unknownModelLog.Warn("anthropic", keyID, model)
 		return
 	}
 	if err := a.meter.Record(ctx, keyID, cost); err != nil {

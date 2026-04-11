@@ -96,27 +96,49 @@ func writeJSON(w http.ResponseWriter, code int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
+// apiError is the standard error envelope returned by the admin API for
+// validation failures that carry a stable, machine-readable code. The
+// envelope shape is intentionally small and matches the idiom used by
+// most modern admin APIs so #16 (admin API error standardization) can
+// retrofit the rest of the surface to the same shape without a breaking
+// change.
+type apiError struct {
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+func writeAPIError(w http.ResponseWriter, status int, code, message string) {
+	var e apiError
+	e.Error.Code = code
+	e.Error.Message = message
+	writeJSON(w, status, e)
+}
+
 // keyView is the safe projection of a VirtualKey for list/get responses.
 // It never includes the rein token or the upstream API key.
 type keyView struct {
-	ID             string     `json:"id"`
-	Name           string     `json:"name"`
-	Upstream       string     `json:"upstream"`
-	DailyBudgetUSD float64    `json:"daily_budget_usd"`
-	MonthBudgetUSD float64    `json:"month_budget_usd"`
-	CreatedAt      time.Time  `json:"created_at"`
-	RevokedAt      *time.Time `json:"revoked_at,omitempty"`
+	ID              string     `json:"id"`
+	Name            string     `json:"name"`
+	Upstream        string     `json:"upstream"`
+	DailyBudgetUSD  float64    `json:"daily_budget_usd"`
+	MonthBudgetUSD  float64    `json:"month_budget_usd"`
+	UpstreamBaseURL string     `json:"upstream_base_url,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	RevokedAt       *time.Time `json:"revoked_at,omitempty"`
 }
 
 func viewOf(k *keys.VirtualKey) keyView {
 	return keyView{
-		ID:             k.ID,
-		Name:           k.Name,
-		Upstream:       k.Upstream,
-		DailyBudgetUSD: k.DailyBudgetUSD,
-		MonthBudgetUSD: k.MonthBudgetUSD,
-		CreatedAt:      k.CreatedAt,
-		RevokedAt:      k.RevokedAt,
+		ID:              k.ID,
+		Name:            k.Name,
+		Upstream:        k.Upstream,
+		DailyBudgetUSD:  k.DailyBudgetUSD,
+		MonthBudgetUSD:  k.MonthBudgetUSD,
+		UpstreamBaseURL: k.UpstreamBaseURL,
+		CreatedAt:       k.CreatedAt,
+		RevokedAt:       k.RevokedAt,
 	}
 }
 
@@ -129,11 +151,12 @@ type createKeyResponse struct {
 
 func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name           string  `json:"name"`
-		Upstream       string  `json:"upstream"`
-		UpstreamKey    string  `json:"upstream_key"`
-		DailyBudgetUSD float64 `json:"daily_budget_usd"`
-		MonthBudgetUSD float64 `json:"month_budget_usd"`
+		Name            string  `json:"name"`
+		Upstream        string  `json:"upstream"`
+		UpstreamKey     string  `json:"upstream_key"`
+		DailyBudgetUSD  float64 `json:"daily_budget_usd"`
+		MonthBudgetUSD  float64 `json:"month_budget_usd"`
+		UpstreamBaseURL string  `json:"upstream_base_url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid json body", http.StatusBadRequest)
@@ -161,6 +184,29 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "budgets must be non-negative", http.StatusBadRequest)
 		return
 	}
+	// Per-key upstream base URL override. Only meaningful for the OpenAI
+	// adapter in 0.2 (no known Anthropic-compatible providers in the wild),
+	// so reject it on anthropic keys up front rather than silently ignoring.
+	canonicalBaseURL := ""
+	if strings.TrimSpace(body.UpstreamBaseURL) != "" {
+		if body.Upstream != keys.UpstreamOpenAI {
+			writeAPIError(w, http.StatusBadRequest,
+				keys.ErrCodeInvalidBaseURL,
+				"upstream_base_url is only supported when upstream is 'openai'")
+			return
+		}
+		canonical, err := keys.ValidateUpstreamBaseURL(body.UpstreamBaseURL)
+		if err != nil {
+			if bue := keys.AsBaseURLError(err); bue != nil {
+				writeAPIError(w, http.StatusBadRequest, bue.Code, bue.Message)
+				return
+			}
+			writeAPIError(w, http.StatusBadRequest,
+				keys.ErrCodeInvalidBaseURL, "invalid upstream_base_url")
+			return
+		}
+		canonicalBaseURL = canonical
+	}
 
 	id, err := keys.GenerateID()
 	if err != nil {
@@ -176,14 +222,15 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	vk := &keys.VirtualKey{
-		ID:             id,
-		Token:          token,
-		Name:           name,
-		Upstream:       body.Upstream,
-		UpstreamKey:    body.UpstreamKey,
-		DailyBudgetUSD: body.DailyBudgetUSD,
-		MonthBudgetUSD: body.MonthBudgetUSD,
-		CreatedAt:      time.Now().UTC(),
+		ID:              id,
+		Token:           token,
+		Name:            name,
+		Upstream:        body.Upstream,
+		UpstreamKey:     body.UpstreamKey,
+		DailyBudgetUSD:  body.DailyBudgetUSD,
+		MonthBudgetUSD:  body.MonthBudgetUSD,
+		UpstreamBaseURL: canonicalBaseURL,
+		CreatedAt:       time.Now().UTC(),
 	}
 	if err := s.keys.Create(r.Context(), vk); err != nil {
 		slog.Error("create virtual key", "err", err)

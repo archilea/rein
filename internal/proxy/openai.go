@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/archilea/rein/internal/keys"
 	"github.com/archilea/rein/internal/meter"
@@ -30,6 +31,18 @@ type OpenAI struct {
 	rp     *httputil.ReverseProxy
 	meter  meter.Meter
 	pricer *meter.Pricer
+	// baseURLCache memoizes per-key upstream_base_url overrides as parsed
+	// *url.URL pointers keyed by the raw string form. This keeps the hot
+	// path to a single sync.Map.Load on cache hit and a one-time parse per
+	// distinct override value on miss. Map entries are never evicted; the
+	// set is bounded by the number of distinct per-key base URLs configured
+	// on the process, which is operator-controlled and small.
+	baseURLCache sync.Map
+	// unknownModelLog is the dedupe logger for "model not in pricing table;
+	// spend not recorded" WARN lines, so an operator pointing a key at a
+	// provider whose models are outside the embedded table gets loud early
+	// signals without log flooding under sustained traffic.
+	unknownModelLog *unknownModelLogger
 }
 
 // NewOpenAI creates an OpenAI adapter that forwards to base (for example,
@@ -43,7 +56,12 @@ func NewOpenAI(base string, m meter.Meter, pricer *meter.Pricer) (*OpenAI, error
 		return nil, fmt.Errorf("openai base url must include scheme and host, got %q", base)
 	}
 
-	o := &OpenAI{base: u, meter: m, pricer: pricer}
+	o := &OpenAI{
+		base:            u,
+		meter:           m,
+		pricer:          pricer,
+		unknownModelLog: newUnknownModelLogger(),
+	}
 	o.rp = &httputil.ReverseProxy{
 		Rewrite:        o.rewrite,
 		ModifyResponse: o.modifyResponse,
@@ -69,14 +87,51 @@ func (o *OpenAI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // that OpenAI returns a final usage chunk. Without this, streaming clients
 // would silently bypass budget enforcement.
 func (o *OpenAI) rewrite(r *httputil.ProxyRequest) {
-	r.SetURL(o.base)
-	r.Out.Host = o.base.Host
-	if vk := VKeyFromContext(r.In.Context()); vk != nil {
+	vk := VKeyFromContext(r.In.Context())
+	target := o.base
+	if vk != nil && vk.UpstreamBaseURL != "" {
+		if override := o.lookupOverrideURL(vk.UpstreamBaseURL); override != nil {
+			target = override
+		}
+	}
+	r.SetURL(target)
+	r.Out.Host = target.Host
+	if vk != nil {
 		r.Out.Header.Set("Authorization", "Bearer "+vk.UpstreamKey)
 	}
 	if o.meter != nil {
 		injectStreamUsage(r.Out)
 	}
+}
+
+// lookupOverrideURL returns a memoized *url.URL for a per-key upstream base
+// URL override, parsing once per distinct value. A parse failure at hot-path
+// time is cached as a typed-nil sentinel so repeat requests for the same
+// malformed value do not re-parse and do not re-log. Callers treat a nil
+// return as "fall back to the global default". In practice this path is
+// unreachable because the admin handler validates the URL on create, but
+// defense in depth keeps a future schema-change or manual DB edit from
+// flooding logs or spiking CPU on the hot path.
+func (o *OpenAI) lookupOverrideURL(raw string) *url.URL {
+	if cached, ok := o.baseURLCache.Load(raw); ok {
+		u, _ := cached.(*url.URL)
+		return u // may be a typed-nil sentinel (negative cache hit)
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		// Cache the negative result. LoadOrStore so a concurrent first-miss
+		// on the same bad value logs at most once per distinct raw string,
+		// even if two goroutines race through the parse path.
+		if _, loaded := o.baseURLCache.LoadOrStore(raw, (*url.URL)(nil)); !loaded {
+			slog.Warn("openai per-key base URL parse failed; falling back to global default",
+				"upstream_base_url", raw, "err", err)
+		}
+		return nil
+	}
+	// LoadOrStore so a concurrent first-miss on the same raw value does
+	// not leak two parsed URLs — both goroutines return the same pointer.
+	actual, _ := o.baseURLCache.LoadOrStore(raw, parsed)
+	return actual.(*url.URL)
 }
 
 // injectStreamUsage rewrites a JSON request body to set
@@ -225,7 +280,7 @@ func (o *OpenAI) recordSpend(ctx context.Context, keyID, model string, inputToke
 	}
 	cost, ok := o.pricer.Cost(keys.UpstreamOpenAI, model, inputTokens, outputTokens)
 	if !ok {
-		slog.Warn("openai model not in pricing table; spend not recorded", "model", model)
+		o.unknownModelLog.Warn("openai", keyID, model)
 		return
 	}
 	if err := o.meter.Record(ctx, keyID, cost); err != nil {

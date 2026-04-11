@@ -22,15 +22,16 @@ type SQLite struct {
 
 const sqliteSchema = `
 CREATE TABLE IF NOT EXISTS virtual_keys (
-	id               TEXT PRIMARY KEY,
-	token            TEXT NOT NULL UNIQUE,
-	name             TEXT NOT NULL,
-	upstream         TEXT NOT NULL,
-	upstream_key     TEXT NOT NULL,
-	daily_budget_usd REAL NOT NULL DEFAULT 0,
-	month_budget_usd REAL NOT NULL DEFAULT 0,
-	created_at       TEXT NOT NULL,
-	revoked_at       TEXT
+	id                 TEXT PRIMARY KEY,
+	token              TEXT NOT NULL UNIQUE,
+	name               TEXT NOT NULL,
+	upstream           TEXT NOT NULL,
+	upstream_key       TEXT NOT NULL,
+	daily_budget_usd   REAL NOT NULL DEFAULT 0,
+	month_budget_usd   REAL NOT NULL DEFAULT 0,
+	upstream_base_url  TEXT NOT NULL DEFAULT '',
+	created_at         TEXT NOT NULL,
+	revoked_at         TEXT
 );`
 
 // NewSQLite opens (or creates) a SQLite database at path and applies the schema.
@@ -58,7 +59,86 @@ func NewSQLite(path string, c Cipher) (*SQLite, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	// Forward migrations for databases created before the current schema.
+	// Each entry must be idempotent and safe to run against a fresh DB.
+	if err := applySQLiteMigrations(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("apply migrations: %w", err)
+	}
 	return &SQLite{db: db, cipher: c}, nil
+}
+
+// applySQLiteMigrations adds any columns that the CREATE TABLE above has
+// picked up since the oldest supported on-disk schema. We stay away from a
+// migrations table for now: SQLite's PRAGMA table_info is authoritative, and
+// all of these migrations are additive column adds so they commute.
+func applySQLiteMigrations(db *sql.DB) error {
+	has, err := sqliteColumnExists(db, "virtual_keys", "upstream_base_url")
+	if err != nil {
+		return err
+	}
+	if !has {
+		if _, err := db.Exec(
+			`ALTER TABLE virtual_keys ADD COLUMN upstream_base_url TEXT NOT NULL DEFAULT ''`,
+		); err != nil {
+			return fmt.Errorf("add upstream_base_url column: %w", err)
+		}
+	}
+	return nil
+}
+
+// sqliteColumnExists reports whether the named column exists on the named
+// table, via PRAGMA table_info. Works on every SQLite version the pure-Go
+// driver supports, unlike ADD COLUMN IF NOT EXISTS which landed in 3.35.
+func sqliteColumnExists(db *sql.DB, table, column string) (bool, error) {
+	// PRAGMA table_info takes a bareword identifier, not a placeholder,
+	// so we validate the table name against a strict allow-list before
+	// interpolating it to keep gosec happy and the surface trivially
+	// auditable.
+	if !validBareIdent(table) {
+		return false, fmt.Errorf("pragma table_info: invalid table name %q", table)
+	}
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false, fmt.Errorf("pragma table_info: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			ctype   string
+			notnull int
+			dflt    sql.NullString
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, fmt.Errorf("scan table_info: %w", err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// validBareIdent matches a conservative SQL identifier: lowercase letters,
+// digits, and underscore, starting with a letter. Used to gate bareword
+// interpolation in the one PRAGMA call that cannot take a placeholder.
+func validBareIdent(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9' && i > 0:
+		case r == '_' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Close releases the underlying database handle.
@@ -80,10 +160,11 @@ func (s *SQLite) Create(ctx context.Context, k *VirtualKey) error {
 		return fmt.Errorf("encrypt upstream key: %w", err)
 	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO virtual_keys (id, token, name, upstream, upstream_key, daily_budget_usd, month_budget_usd, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO virtual_keys (id, token, name, upstream, upstream_key, daily_budget_usd, month_budget_usd, upstream_base_url, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		k.ID, k.Token, k.Name, k.Upstream, encUpstream,
-		k.DailyBudgetUSD, k.MonthBudgetUSD, k.CreatedAt.UTC().Format(time.RFC3339Nano))
+		k.DailyBudgetUSD, k.MonthBudgetUSD, k.UpstreamBaseURL,
+		k.CreatedAt.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("insert virtual key: %w", err)
 	}
@@ -108,10 +189,12 @@ func (s *SQLite) queryOne(ctx context.Context, column, value string) (*VirtualKe
 	switch column {
 	case "id":
 		q = `SELECT id, token, name, upstream, upstream_key, daily_budget_usd,
-			month_budget_usd, created_at, revoked_at FROM virtual_keys WHERE id = ?`
+			month_budget_usd, upstream_base_url, created_at, revoked_at
+			FROM virtual_keys WHERE id = ?`
 	case "token":
 		q = `SELECT id, token, name, upstream, upstream_key, daily_budget_usd,
-			month_budget_usd, created_at, revoked_at FROM virtual_keys WHERE token = ?`
+			month_budget_usd, upstream_base_url, created_at, revoked_at
+			FROM virtual_keys WHERE token = ?`
 	default:
 		return nil, fmt.Errorf("queryOne: unsupported lookup column %q", column)
 	}
@@ -123,7 +206,7 @@ func (s *SQLite) queryOne(ctx context.Context, column, value string) (*VirtualKe
 func (s *SQLite) List(ctx context.Context) ([]*VirtualKey, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, token, name, upstream, upstream_key, daily_budget_usd,
-		       month_budget_usd, created_at, revoked_at
+		       month_budget_usd, upstream_base_url, created_at, revoked_at
 		FROM virtual_keys ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("query keys: %w", err)
@@ -175,7 +258,8 @@ func (s *SQLite) scanKey(scan func(dest ...any) error) (*VirtualKey, error) {
 		revokedAt   sql.NullString
 	)
 	err := scan(&k.ID, &k.Token, &k.Name, &k.Upstream, &encUpstream,
-		&k.DailyBudgetUSD, &k.MonthBudgetUSD, &createdAt, &revokedAt)
+		&k.DailyBudgetUSD, &k.MonthBudgetUSD, &k.UpstreamBaseURL,
+		&createdAt, &revokedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

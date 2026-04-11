@@ -43,8 +43,16 @@ type VirtualKey struct {
 	UpstreamKey    string
 	DailyBudgetUSD float64
 	MonthBudgetUSD float64
-	CreatedAt      time.Time
-	RevokedAt      *time.Time
+	// UpstreamBaseURL is an optional per-key override of the global upstream
+	// base URL (REIN_OPENAI_BASE / REIN_ANTHROPIC_BASE). Empty means use the
+	// global default. When set, it must be a canonical scheme+host form
+	// (validated at admin-handler boundary via ValidateUpstreamBaseURL) and
+	// is currently only honored when Upstream == UpstreamOpenAI, so any
+	// OpenAI-compatible provider (Groq, Together, Fireworks, DeepSeek, xAI,
+	// local vLLM/Ollama, etc.) can ride the existing OpenAI adapter.
+	UpstreamBaseURL string
+	CreatedAt       time.Time
+	RevokedAt       *time.Time
 }
 
 // IsRevoked reports whether the key has been revoked.

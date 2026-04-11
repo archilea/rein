@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Per-key upstream base URL override** (#24). A virtual key can now
+  carry an `upstream_base_url` that replaces the global `REIN_OPENAI_BASE`
+  for that key's requests. Unlocks any OpenAI-compatible provider (Groq,
+  Together, Fireworks, DeepSeek, xAI Grok, OpenRouter, Perplexity,
+  Cerebras, local vLLM / Ollama / LocalAI, ...) using Rein's existing
+  OpenAI adapter with no new wire-protocol code. Admin validation
+  accepts only `https` (or `http` for loopback hosts), rejects path,
+  query, fragment, and userinfo, and returns a stable `{"error":
+  {"code": ..., "message": ...}}` envelope with one of four error codes
+  (`invalid_upstream_base_url`, `invalid_upstream_base_url_scheme`,
+  `invalid_upstream_base_url_host`, `invalid_upstream_base_url_path`).
+  The hot-path override uses a `sync.Map` of parsed URLs keyed by raw
+  string so repeat requests pay only a single lock-free load; benchmark
+  delta against the existing SQLite+budget hot path is within noise.
+  Only the OpenAI adapter is overridable in 0.2; Anthropic and Azure
+  OpenAI are tracked separately. Unknown models hit by an override key
+  trigger a `model not in pricing table; spend not recorded` WARN that
+  fires for every occurrence within the first 60 seconds of a new
+  `(key_id, model)` pair and rate-limits to once per minute afterwards,
+  so operators notice the gap immediately. SQLite keystore gains an
+  additive `upstream_base_url` column with a forward-compatible
+  migration that runs idempotently against pre-existing databases.
+
 ### Planned for 0.2
 
 - Durable SQLite-backed spend meter so budget totals survive process restart.
