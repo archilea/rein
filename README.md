@@ -4,7 +4,7 @@
 
 ### A modern, lightweight reverse proxy for LLMs.
 
-Rein is a small, auditable Go reverse proxy that sits between your apps and the major LLM providers. It swaps virtual keys for real upstream credentials at the edge, meters token spend from streaming and non-streaming responses, enforces hard USD budget caps per key, and exposes an instant global kill-switch for incident response. Native adapters ship for OpenAI and Anthropic, with a per-key base URL override for any OpenAI-compatible provider. Single static binary, pure Go, no CGO. Under 2,000 lines of code. No telemetry, ever.
+Rein is a small, auditable Go reverse proxy that sits between your apps and the major LLM providers. It swaps virtual keys for real upstream credentials at the edge, meters token spend from streaming and non-streaming responses, enforces hard USD budget caps per key, and exposes an instant global kill-switch for incident response. Native adapters ship for OpenAI and Anthropic, with a per-key base URL override for any OpenAI-compatible provider. Single static binary, pure Go, no CGO. No telemetry, ever.
 
 [![CI](https://github.com/archilea/rein/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/archilea/rein/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
@@ -61,9 +61,17 @@ Rein exists specifically for teams who:
 
 ## Audit-friendly ceiling
 
-Rein is intentionally small. The entire codebase is under 2,000 lines of Go. You can read it end-to-end in an afternoon, and a security review can cover every line. The pricing table is embedded JSON, not Go code, so the codebase stays focused on behavior.
+Rein is intentionally small. A security review can cover every line in an afternoon. The disciplines we enforce in CI to keep it that way are a ceiling on direct non-stdlib dependencies, a ceiling on the number of modules that reach the production binary, and a ceiling on compressed image size. These are internal design targets, not a public SLA: they exist because drift is easier to catch early than it is to reverse.
 
-If a feature would push Rein past this ceiling, it does not belong here. We will document the pattern in an issue and point you at a complementary tool that already solves it.
+**Current state**, as of the latest release:
+
+- **1 direct non-stdlib dependency** (`modernc.org/sqlite`)
+- **10 compiled production modules** (measured with `go list -deps ./cmd/rein`, excluding stdlib and test-only deps)
+- **~12 MB compressed amd64 image**
+
+If those numbers change materially in a future release, the `CHANGELOG.md` entry for that release will say why. The specific CI thresholds live in `.github/workflows/ci.yml` as grep-able literals so the history of every budget change is visible in `git log` on that file.
+
+Source LOC is not a pinned number. It is a private design forcing-function we use when sizing proposals. If a feature would push Rein past an audit-friendly shape, it does not belong here. We will document the pattern in an issue and point you at a complementary tool that already solves it.
 
 ## Works with
 
@@ -321,7 +329,7 @@ Kept deliberately short. Features that would break the size ceiling are not here
 
 Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the flow. Issues tagged `good first issue` are a good place to start.
 
-Scope-of-work expectations: Rein stays small. If your PR adds more than a few hundred lines, please open an issue first so we can agree it fits the identity.
+Scope-of-work expectations: Rein stays small. If your PR adds more than a few hundred lines, please open an issue first so we can agree it fits the identity. This is reviewer-fatigue guidance, not a hard cap. The enforced size bounds are direct dependency count and compressed image size, not source LOC (see [Audit-friendly ceiling](#audit-friendly-ceiling)).
 
 ## Security
 
@@ -335,7 +343,7 @@ Found a vulnerability? Please do not open a public issue. Email `security@archil
 
 Rein is a specific shape: a small, auditable reverse proxy that does a deliberately short list of things. The differentiators are architectural, not feature-count.
 
-- **Under 2,000 lines of Go** in a single static binary. A security team can read it end-to-end in an afternoon. The pricing table is embedded JSON, not Go code, so the binary stays focused on behavior.
+- **Small on purpose.** CI-enforced ceilings on dependency count and compressed image size keep supply-chain surface tight; a security team can read the whole codebase end-to-end in an afternoon. Current state is published under [Audit-friendly ceiling](#audit-friendly-ceiling) each release. The pricing table is embedded JSON, not Go code, so the binary stays focused on behavior.
 - **Pure Go, no CGO.** No Python runtime, no dependency conflicts, no base-image surprises. Runs as a sidecar next to anything.
 - **No telemetry, ever.** A hard commitment as a core identity, not a config flag you can turn off later.
 - **AES-256-GCM encryption at rest by default.** The process refuses to start without an encryption key, so plaintext credentials cannot land on disk by accident.
