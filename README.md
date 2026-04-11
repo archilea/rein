@@ -175,7 +175,7 @@ Two things to know, because honesty is the whole point of this project:
 
 2. **0.1 uses an in-process meter that resets on restart.** Spend totals live in memory. If the Rein process crashes and restarts, counters reset to zero. This is fine for single-replica deployments where a crash means a deliberate restart, and disastrous for loops that would otherwise climb indefinitely. A SQLite-backed durable meter is the top item on the 0.2 roadmap. Set a conservative cap and pin a single replica until it lands.
 
-Budgets use the embedded pricing table under `internal/meter/pricing.json`, which was verified against vendor docs on the date shown in the `fetched_at` field. Verify against your own account's pricing before turning on caps in production. Unknown or newly released models are logged and skipped (they do not count toward spend) so a new model release never breaks the proxy.
+Budgets use the embedded pricing table under `internal/meter/pricing.json`, which was verified against vendor docs on the date shown in the `fetched_at` field. Verify against your own account's pricing before turning on caps in production. Unknown or newly released models are logged and skipped (they do not count toward spend) so a new model release never breaks the proxy. Operators who want to **override a vendor price** (out-of-date embedded value, or a custom rate from their account) or **add pricing for a provider-specific model** (Groq's `llama-3.3-70b-versatile`, Fireworks models, DeepSeek, etc.) can drop a `rein.json` at `/etc/rein/rein.json` — or point at any path via `REIN_CONFIG_FILE` — and reload with `SIGHUP`. See [docs/quickstart.md § 3b](docs/quickstart.md) for the full file format, hybrid resolution rules, and Kubernetes ConfigMap guidance.
 
 **Streaming** is fully supported. Rein tees SSE response bodies as they flow to your client and parses the token usage chunks in line. For OpenAI chat completions, Rein automatically injects `stream_options.include_usage: true` into the outbound request body so the upstream returns a final usage chunk (the client sees the stream unchanged). For Anthropic, usage is parsed from the native `message_start` and `message_delta` events. If a client explicitly sets `stream_options.include_usage: false` on an OpenAI request, Rein respects that choice and logs a warning: spend for that request will not be recorded.
 
@@ -307,6 +307,8 @@ Rein is configured via environment variables. Only `REIN_ADMIN_TOKEN` is require
 | `REIN_ENCRYPTION_KEY` | _(required for sqlite)_ | 64-char hex (32 bytes) AES-256-GCM key for at-rest encryption |
 | `REIN_OPENAI_BASE` | `https://api.openai.com` | OpenAI upstream override |
 | `REIN_ANTHROPIC_BASE` | `https://api.anthropic.com` | Anthropic upstream override |
+| `REIN_CONFIG_FILE` | _(unset)_ | Operator-editable pricing overrides file. If unset, Rein probes `/etc/rein/rein.json`; if that is also absent, runs against just the embedded pricing table. See [docs/quickstart.md § 3b](docs/quickstart.md). |
+| `REIN_CONFIG_POLL_INTERVAL` | _(unset)_ | Opt-in background poll interval for `REIN_CONFIG_FILE`. Duration in Go `time.ParseDuration` form (e.g. `30s`, `5m`). Bounded to `[1s, 1h]`; out-of-range values fail at startup. Unset means SIGHUP-only reload. |
 
 ## Roadmap
 
@@ -321,6 +323,9 @@ Kept deliberately short. Features that would break the size ceiling are not here
 - [x] `0.1` Budget enforcement (daily and monthly caps per key)
 - [x] `0.1` Embedded vendor-verified pricing table for OpenAI and Anthropic
 - [x] `0.1` Streaming token usage extraction (SSE) for OpenAI and Anthropic
+- [x] `0.2` Per-key upstream base URL override for any OpenAI-compatible provider (Groq, Fireworks, OpenRouter, DeepSeek, xAI, local vLLM/Ollama, ...)
+- [x] `0.2` Operator-editable pricing overrides with SIGHUP + poll-based hot reload
+- [x] `0.2` CI-enforced audit-friendly ceilings (direct dep count, compiled dep count, compressed image size)
 - [ ] `0.2` Durable SQLite-backed meter (spend survives restart)
 - [ ] `0.2` Encryption key rotation tool
 - [ ] `0.3` Slack / Discord / webhook alerts at budget thresholds
