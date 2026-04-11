@@ -339,7 +339,6 @@ func TestAdmin_CreateKey_InvalidUpstreamBaseURL(t *testing.T) {
 	}{
 		{"non-loopback http", "http://api.example.com", keys.ErrCodeInvalidBaseURLScheme},
 		{"ftp scheme", "ftp://api.example.com", keys.ErrCodeInvalidBaseURLScheme},
-		{"path included", "https://api.example.com/v1", keys.ErrCodeInvalidBaseURLPath},
 		{"query included", "https://api.example.com?foo=bar", keys.ErrCodeInvalidBaseURLQuery},
 		{"fragment included", "https://api.example.com#f", keys.ErrCodeInvalidBaseURLFragment},
 		{"userinfo included", "https://user:pass@api.example.com", keys.ErrCodeInvalidBaseURLHost},
@@ -362,6 +361,36 @@ func TestAdmin_CreateKey_InvalidUpstreamBaseURL(t *testing.T) {
 				t.Errorf("envelope message should be non-empty")
 			}
 		})
+	}
+}
+
+func TestAdmin_CreateKey_UpstreamBaseURLWithPathPrefix(t *testing.T) {
+	// Real OpenAI-compatible providers (Groq at /openai, OpenRouter at
+	// /api, Fireworks at /inference) mount under a path prefix. The
+	// validator accepts a non-empty path, and httputil.ProxyRequest.SetURL
+	// joins the base path with the incoming /v1/... so routing works with
+	// no adapter change.
+	_, _, store, mux := newTestServer(t)
+
+	body := `{"name":"groq-prefix","upstream":"openai","upstream_key":"gsk-real","upstream_base_url":"https://api.groq.com/openai/"}`
+	rec := postAuthed(t, mux, "/admin/v1/keys", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status: got %d want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp createKeyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.UpstreamBaseURL != "https://api.groq.com/openai" {
+		t.Errorf("canonical form with path: got %q want https://api.groq.com/openai", resp.UpstreamBaseURL)
+	}
+	vk, err := store.GetByToken(context.Background(), resp.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vk.UpstreamBaseURL != "https://api.groq.com/openai" {
+		t.Errorf("stored path: got %q want https://api.groq.com/openai", vk.UpstreamBaseURL)
 	}
 }
 

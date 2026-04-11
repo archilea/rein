@@ -11,11 +11,17 @@ import (
 // These are surfaced verbatim in the admin API error envelope so operators
 // can tell at a glance which rule their URL violated. Treat as part of the
 // public admin-API contract; do not rename without a CHANGELOG entry.
+//
+// ErrCodeInvalidBaseURLPath is retained as a stable public contract symbol
+// for ABI compatibility but is no longer emitted: real OpenAI-compatible
+// providers (Groq at /openai, OpenRouter at /api, Fireworks at /inference)
+// use a path prefix, so the validator now accepts a non-empty path. A
+// future breaking change could remove this constant with a CHANGELOG entry.
 const (
 	ErrCodeInvalidBaseURL         = "invalid_upstream_base_url"
 	ErrCodeInvalidBaseURLScheme   = "invalid_upstream_base_url_scheme"
 	ErrCodeInvalidBaseURLHost     = "invalid_upstream_base_url_host"
-	ErrCodeInvalidBaseURLPath     = "invalid_upstream_base_url_path"
+	ErrCodeInvalidBaseURLPath     = "invalid_upstream_base_url_path" // no longer emitted; retained for ABI stability
 	ErrCodeInvalidBaseURLQuery    = "invalid_upstream_base_url_query"
 	ErrCodeInvalidBaseURLFragment = "invalid_upstream_base_url_fragment"
 )
@@ -37,9 +43,9 @@ func newBaseURLError(code, msg string) *BaseURLError {
 }
 
 // ValidateUpstreamBaseURL normalizes and validates a per-key upstream base
-// URL override. It returns the canonical "scheme://host[:port]" form (no
-// trailing slash, no path, no query, no fragment) on success, or a typed
-// *BaseURLError on failure.
+// URL override. It returns the canonical "scheme://host[:port][/path]" form
+// (lowercased scheme, trailing slash stripped, no query, no fragment) on
+// success, or a typed *BaseURLError on failure.
 //
 // Rules:
 //  1. Must parse via net/url.Parse.
@@ -48,10 +54,23 @@ func newBaseURLError(code, msg string) *BaseURLError {
 //     local vLLM / Ollama / LocalAI ergonomics. Schemes other than http/https
 //     (file, unix, ftp, ...) are rejected outright.
 //  3. Host must be present and non-empty.
-//  4. Path, raw query, and fragment must all be empty. Rein's OpenAI
-//     adapter composes the full request path itself; allowing an operator
-//     to inject a path prefix would silently change routing semantics.
-//     (Azure OpenAI needs path rewriting and is tracked separately.)
+//  4. A non-empty path IS allowed. Many real OpenAI-compatible providers
+//     mount under a path prefix: Groq at /openai, OpenRouter at /api,
+//     Fireworks at /inference. httputil.ProxyRequest.SetURL joins
+//     target.Path with the incoming request path, so a base URL of
+//     https://api.groq.com/openai + an incoming /v1/chat/completions is
+//     routed to https://api.groq.com/openai/v1/chat/completions without
+//     any adapter change. The operator-facing convention is "base URL is
+//     everything up to but not including the /v1/ segment that Rein
+//     already prepends on every outbound request".
+//  5. Query and fragment must be empty. An upstream base URL has no
+//     business carrying query parameters or anchors, and allowing either
+//     would silently change routing semantics.
+//  6. Userinfo must be absent. Credentials belong in upstream_key.
+//
+// Canonicalization strips a trailing slash from the path (so
+// https://api.groq.com/openai/ and https://api.groq.com/openai are equal),
+// lowercases the scheme, and preserves the host and port verbatim.
 //
 // The returned string is suitable for direct storage in the keystore and
 // for direct url.Parse at hot-path time.
@@ -73,13 +92,6 @@ func ValidateUpstreamBaseURL(raw string) (string, error) {
 		return "", newBaseURLError(ErrCodeInvalidBaseURLScheme,
 			"upstream_base_url scheme must be https (or http for loopback only)")
 	}
-	// Path / query / fragment are scope-expansion risks. Reject them with a
-	// specific code so operators do not have to guess which character
-	// caused the rejection.
-	if u.Path != "" && u.Path != "/" {
-		return "", newBaseURLError(ErrCodeInvalidBaseURLPath,
-			"upstream_base_url must not contain a path; Rein's adapter composes the full path itself")
-	}
 	if u.RawQuery != "" {
 		return "", newBaseURLError(ErrCodeInvalidBaseURLQuery,
 			"upstream_base_url must not contain a query string")
@@ -99,9 +111,12 @@ func ValidateUpstreamBaseURL(raw string) (string, error) {
 				"upstream_base_url must use https for non-loopback hosts")
 		}
 	}
-	// Canonical form: scheme + host (with port if present), lowercased
-	// scheme, no trailing slash, no path/query/fragment.
+	// Canonical form: scheme + host (with port if present) + optional
+	// path prefix with trailing slash stripped. No query/fragment.
 	canonical := scheme + "://" + u.Host
+	if path := strings.TrimRight(u.Path, "/"); path != "" {
+		canonical += path
+	}
 	return canonical, nil
 }
 

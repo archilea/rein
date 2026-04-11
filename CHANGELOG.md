@@ -15,11 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Together, Fireworks, DeepSeek, xAI Grok, OpenRouter, Perplexity,
   Cerebras, local vLLM / Ollama / LocalAI, ...) using Rein's existing
   OpenAI adapter with no new wire-protocol code. Admin validation
-  accepts only `https` (or `http` for loopback hosts), rejects path,
-  query, fragment, and userinfo, and returns a stable `{"error":
-  {"code": ..., "message": ...}}` envelope with one of four error codes
-  (`invalid_upstream_base_url`, `invalid_upstream_base_url_scheme`,
-  `invalid_upstream_base_url_host`, `invalid_upstream_base_url_path`).
+  accepts `https` (or `http` for loopback hosts), allows an optional
+  path prefix (so `https://api.groq.com/openai` is accepted because
+  Groq mounts its OpenAI-compatible surface under `/openai`; ditto
+  `https://openrouter.ai/api` and `https://api.fireworks.ai/inference`),
+  strips a trailing slash during canonicalization, rejects query string,
+  fragment, and userinfo, and returns a stable `{"error": {"code": ...,
+  "message": ...}}` envelope on failure.
   The hot-path override uses a `sync.Map` of parsed URLs keyed by raw
   string so repeat requests pay only a single lock-free load; benchmark
   delta against the existing SQLite+budget hot path is within noise.

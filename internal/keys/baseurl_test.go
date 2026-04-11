@@ -19,6 +19,15 @@ func TestValidateUpstreamBaseURL_Canonicalization(t *testing.T) {
 		{"ipv6 loopback http allowed", "http://[::1]:11434", "http://[::1]:11434"},
 		{"localhost http allowed", "http://localhost:11434", "http://localhost:11434"},
 		{"whitespace trimmed", "  https://api.groq.com  ", "https://api.groq.com"},
+		// Path prefix cases: real OpenAI-compatible providers mount
+		// under a prefix. httputil.ProxyRequest.SetURL joins the base
+		// path with the incoming request path, so these shapes are
+		// exactly what Groq / OpenRouter / Fireworks expect.
+		{"groq prefix kept", "https://api.groq.com/openai", "https://api.groq.com/openai"},
+		{"groq prefix trailing slash stripped", "https://api.groq.com/openai/", "https://api.groq.com/openai"},
+		{"openrouter prefix kept", "https://openrouter.ai/api", "https://openrouter.ai/api"},
+		{"fireworks prefix kept", "https://api.fireworks.ai/inference", "https://api.fireworks.ai/inference"},
+		{"multi-segment prefix", "https://example.com/a/b/c", "https://example.com/a/b/c"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -46,9 +55,10 @@ func TestValidateUpstreamBaseURL_Rejections(t *testing.T) {
 		{"file scheme", "file:///etc/passwd", ErrCodeInvalidBaseURLHost},
 		{"non-loopback http", "http://api.groq.com", ErrCodeInvalidBaseURLScheme},
 		{"public ip http", "http://8.8.8.8", ErrCodeInvalidBaseURLScheme},
-		{"path rejected", "https://api.groq.com/openai/v1", ErrCodeInvalidBaseURLPath},
 		{"query rejected", "https://api.groq.com?foo=bar", ErrCodeInvalidBaseURLQuery},
+		{"query rejected with path", "https://api.groq.com/openai?foo=bar", ErrCodeInvalidBaseURLQuery},
 		{"fragment rejected", "https://api.groq.com#frag", ErrCodeInvalidBaseURLFragment},
+		{"fragment rejected with path", "https://api.groq.com/openai#frag", ErrCodeInvalidBaseURLFragment},
 		{"userinfo rejected", "https://user:pass@api.groq.com", ErrCodeInvalidBaseURLHost},
 	}
 	for _, tc := range cases {
