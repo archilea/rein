@@ -4,9 +4,8 @@
 // (REIN_ADMIN_TOKEN). Constant-time comparison is used to avoid leaking the
 // token via timing side-channels.
 //
-// Scope today is intentionally minimal: the kill-switch endpoints. Key
-// management, budget administration, and usage queries are tracked for
-// follow-up iterations.
+// Administrative capabilities include kill-switch control and virtual key 
+// management (CRUD operations for OpenAI/Anthropic keys with budget controls).
 package admin
 
 import (
