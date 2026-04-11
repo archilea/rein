@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Public positioning.** Reframed as "a modern, lightweight reverse proxy for LLMs" (previously "a small, boring cost and safety brake for LLM API traffic"). No scope change: the same five "deliberately does not do" constraints still hold.
+
 ### Planned for 0.2
 
 - Durable SQLite-backed spend meter so budget totals survive process restart.
