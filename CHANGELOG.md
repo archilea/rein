@@ -7,6 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Operator-editable pricing overrides with hot reload** (#25). A new
+  `rein.json` config file resolved via the hybrid rule — env var
+  `REIN_CONFIG_FILE` wins if set, otherwise `/etc/rein/rein.json`
+  (the default path, picked up automatically in K8s ConfigMap
+  deployments without any env var boilerplate), otherwise run
+  zero-config against the embedded table. Startup log records which
+  rule fired (`source=env_var|default_path|embedded_only`). The file's
+  `models` block merges on top of the embedded pricing table:
+  override entries win for the same `(upstream, model)` pair; new
+  pairs are added. Enables honest budget enforcement and spend
+  recording for every OpenAI-compatible provider unlocked by #24
+  (Groq, Fireworks, OpenRouter, DeepSeek, xAI Grok, and any future
+  entrant) without a Rein release — operators add the model prices
+  in their own file and reload. Zero-config default is unchanged: if
+  neither the env var nor the default path is set, Rein uses just the
+  embedded table, bit-for-bit identical to pre-0.2 behavior.
+
+  Reload triggers: **SIGHUP** (always on when `REIN_CONFIG_FILE` is set;
+  operators run `kill -HUP $(pidof rein)`, `docker kill --signal=HUP
+  rein`, or `systemctl reload rein`) and an **optional background poll**
+  via `REIN_CONFIG_POLL_INTERVAL` (opt-in for Kubernetes ConfigMap
+  deployments; bounded to `[1s, 1h]`, rejected outside that range at
+  startup). Both triggers share the same load-and-swap path so their
+  failure and success behavior are identical by construction.
+
+  Hot-path safety: the active `*Pricer` is wrapped in a new
+  `meter.PricerHolder` that uses `atomic.Pointer[Pricer]` for
+  publication. Adapters (`NewOpenAI` / `NewAnthropic`) take
+  `*PricerHolder` instead of `*Pricer`; every response-side `recordSpend`
+  call does one lock-free atomic load before resolving the price.
+  Micro-benchmark shows the indirection is **10.3 ns/op vs 10.4 ns/op**
+  for the direct path — within measurement noise, zero allocations on
+  either path. Full SQLite+budget hot-path benchmark (~33.5 µs) is
+  unchanged across the swap.
+
+  Validation: strict all-or-nothing. File must parse as JSON, `version`
+  must be `"1"` (or empty, defaults to 1), every `input_per_mtok` and
+  `output_per_mtok` must be `>= 0`. Zero prices are allowed (free tiers,
+  local-hosted models) and log an INFO line per zero entry so operators
+  can tell at a glance what they shipped. A bad reload logs ERROR,
+  includes the active snapshot's model count, and keeps the previous
+  snapshot active — a bad config cannot take down a running process.
+
+  Version mismatch is asymmetric: **fatal at startup**, **warn-and-keep
+  previous snapshot** on reload. An unknown future schema version on
+  `kill -HUP` does not crash an operator's production process.
+
+  File format documented in `docs/quickstart.md` section 3b with a Groq
+  example, the correct SIGHUP / docker kill / systemctl commands, and
+  the Kubernetes poll-interval guidance. Mount the file into the
+  container; do not bake it into the image.
+
+- **Per-key upstream base URL override** (#24). A virtual key can now
+  carry an `upstream_base_url` that replaces the global `REIN_OPENAI_BASE`
+  for that key's requests. Unlocks any OpenAI-compatible provider (Groq,
+  Together, Fireworks, DeepSeek, xAI Grok, OpenRouter, Perplexity,
+  Cerebras, local vLLM / Ollama / LocalAI, ...) using Rein's existing
+  OpenAI adapter with no new wire-protocol code. Admin validation
+  accepts `https` (or `http` for loopback hosts), allows an optional
+  path prefix (so `https://api.groq.com/openai` is accepted because
+  Groq mounts its OpenAI-compatible surface under `/openai`; ditto
+  `https://openrouter.ai/api` and `https://api.fireworks.ai/inference`),
+  strips a trailing slash during canonicalization, rejects query string,
+  fragment, and userinfo, and returns a stable `{"error": {"code": ...,
+  "message": ...}}` envelope on failure.
+  The hot-path override uses a `sync.Map` of parsed URLs keyed by raw
+  string so repeat requests pay only a single lock-free load; benchmark
+  delta against the existing SQLite+budget hot path is within noise.
+  Only the OpenAI adapter is overridable in 0.2; Anthropic and Azure
+  OpenAI are tracked separately. Unknown models hit by an override key
+  trigger a `model not in pricing table; spend not recorded` WARN that
+  fires for every occurrence within the first 60 seconds of a new
+  `(key_id, model)` pair and rate-limits to once per minute afterwards,
+  so operators notice the gap immediately. SQLite keystore gains an
+  additive `upstream_base_url` column with a forward-compatible
+  migration that runs idempotently against pre-existing databases.
+
+### Changed
+
+- **Public positioning.** Reframed as "a modern, lightweight reverse proxy for LLMs" (previously "a small, boring cost and safety brake for LLM API traffic"). No scope change: the same five "deliberately does not do" constraints still hold.
+- **Audit-friendly ceiling** (#39). Replaced the "under 2,000 lines of Go" public guarantee with CI-enforced internal design disciplines: a ceiling on direct non-stdlib dependencies, a ceiling on compiled production modules, and a ceiling on compressed amd64 image size. The specific thresholds live as grep-able literals in `.github/workflows/ci.yml` so every budget change is visible in `git log` on that file. The README now publishes the current state as of each release (1 direct dep, 10 compiled modules, ~12 MB compressed) as transparency, not as a public SLA, so future releases that legitimately move these numbers can evolve without a messy public renegotiation. Source LOC stays as an internal design forcing-function but is no longer pinned in docs. No scope change and no code in `internal/` or `cmd/` touched; only README, CHANGELOG, and the CI workflow changed.
+
 ### Planned for 0.2
 
 - Durable SQLite-backed spend meter so budget totals survive process restart.

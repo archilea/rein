@@ -2,6 +2,9 @@ package keys
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -199,6 +202,232 @@ func TestSQLite_UpstreamKeyEncryptedAtRest(t *testing.T) {
 	}
 	if !strings.HasPrefix(raw, "v1:") {
 		t.Errorf("expected v1: ciphertext prefix, got %q", raw)
+	}
+}
+
+func TestSQLite_UpstreamBaseURLRoundTrip(t *testing.T) {
+	s := newTestSQLite(t)
+	id, err := GenerateID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := GenerateToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	vk := &VirtualKey{
+		ID:              id,
+		Token:           token,
+		Name:            "groq-shadow",
+		Upstream:        UpstreamOpenAI,
+		UpstreamKey:     "gsk-real",
+		UpstreamBaseURL: "https://api.groq.com",
+		CreatedAt:       time.Now().UTC(),
+	}
+	if err := s.Create(context.Background(), vk); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	got, err := s.GetByToken(context.Background(), vk.Token)
+	if err != nil {
+		t.Fatalf("get by token: %v", err)
+	}
+	if got.UpstreamBaseURL != "https://api.groq.com" {
+		t.Errorf("upstream_base_url round-trip: got %q want https://api.groq.com", got.UpstreamBaseURL)
+	}
+
+	// Confirm the column survives list.
+	all, err := s.List(context.Background())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("list length: got %d want 1", len(all))
+	}
+	if all[0].UpstreamBaseURL != "https://api.groq.com" {
+		t.Errorf("list upstream_base_url: got %q want https://api.groq.com", all[0].UpstreamBaseURL)
+	}
+}
+
+func TestSQLite_UpstreamBaseURLDefaultsEmpty(t *testing.T) {
+	s := newTestSQLite(t)
+	vk := mustCreate(t, s, "default", UpstreamOpenAI, "sk-x")
+	got, err := s.GetByToken(context.Background(), vk.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UpstreamBaseURL != "" {
+		t.Errorf("default upstream_base_url: got %q want empty", got.UpstreamBaseURL)
+	}
+}
+
+func TestSQLite_UpstreamBaseURLMigrationIdempotent(t *testing.T) {
+	// Open a fresh DB then reopen. The migration runs twice and must not fail
+	// or duplicate the column.
+	path := filepath.Join(t.TempDir(), "migrate.db")
+	c := mustAESGCM(t)
+	s1, err := NewSQLite(path, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = s1.Close()
+
+	s2, err := NewSQLite(path, c)
+	if err != nil {
+		t.Fatalf("reopen after migration: %v", err)
+	}
+	t.Cleanup(func() { _ = s2.Close() })
+
+	// Confirm the column is present by writing and reading a value.
+	id, _ := GenerateID()
+	token, _ := GenerateToken()
+	vk := &VirtualKey{
+		ID:              id,
+		Token:           token,
+		Name:            "m",
+		Upstream:        UpstreamOpenAI,
+		UpstreamKey:     "sk-m",
+		UpstreamBaseURL: "https://api.fireworks.ai",
+		CreatedAt:       time.Now().UTC(),
+	}
+	if err := s2.Create(context.Background(), vk); err != nil {
+		t.Fatalf("create after reopen: %v", err)
+	}
+	got, err := s2.GetByToken(context.Background(), vk.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UpstreamBaseURL != "https://api.fireworks.ai" {
+		t.Errorf("upstream_base_url after reopen: got %q want https://api.fireworks.ai", got.UpstreamBaseURL)
+	}
+}
+
+// TestSQLite_UpstreamBaseURLMigrationFromPre02Schema exercises the
+// !sqliteColumnExists branch of applySQLiteMigrations by physically
+// materializing a pre-0.2 virtual_keys schema (no upstream_base_url column)
+// at a temp path, closing the raw handle, and then opening via NewSQLite.
+// The migration must run ALTER TABLE ADD COLUMN and leave the DB in a state
+// where a VirtualKey with UpstreamBaseURL round-trips correctly.
+func TestSQLite_UpstreamBaseURLMigrationFromPre02Schema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pre02.db")
+
+	// Open a raw handle and create the pre-0.2 virtual_keys schema without
+	// the upstream_base_url column. We deliberately do NOT go through
+	// NewSQLite because that would apply the current schema + migrations.
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)",
+		url.PathEscape(path))
+	raw, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	const pre02Schema = `
+		CREATE TABLE virtual_keys (
+			id                 TEXT PRIMARY KEY,
+			token              TEXT NOT NULL UNIQUE,
+			name               TEXT NOT NULL,
+			upstream           TEXT NOT NULL,
+			upstream_key       TEXT NOT NULL,
+			daily_budget_usd   REAL NOT NULL DEFAULT 0,
+			month_budget_usd   REAL NOT NULL DEFAULT 0,
+			created_at         TEXT NOT NULL,
+			revoked_at         TEXT
+		);`
+	if _, err := raw.Exec(pre02Schema); err != nil {
+		t.Fatalf("create pre-0.2 schema: %v", err)
+	}
+	// Insert a legacy row using the pre-0.2 column set. Encryption expects
+	// v1:-prefixed ciphertext, but we can just use a real cipher via
+	// NewAESGCM through a second SQLite handle after the migration.
+	// For this test the legacy row body is irrelevant; what matters is
+	// that the migration runs ALTER TABLE ADD COLUMN without error on a
+	// table that was not created by the current CREATE TABLE statement.
+	if _, err := raw.Exec(`INSERT INTO virtual_keys
+		(id, token, name, upstream, upstream_key,
+		 daily_budget_usd, month_budget_usd, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"key_0000000000000001", "rein_live_legacy", "legacy",
+		UpstreamOpenAI, "legacy-ciphertext-placeholder",
+		0.0, 0.0, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw handle: %v", err)
+	}
+
+	// Now open via NewSQLite. Expect the migration to run ADD COLUMN and
+	// for the column to exist afterward with the default empty string on
+	// the legacy row.
+	s, err := NewSQLite(path, mustAESGCM(t))
+	if err != nil {
+		t.Fatalf("open pre-0.2 db via NewSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	has, err := sqliteColumnExists(s.db, "virtual_keys", "upstream_base_url")
+	if err != nil {
+		t.Fatalf("column exists check: %v", err)
+	}
+	if !has {
+		t.Fatal("migration did not add upstream_base_url column")
+	}
+
+	// The legacy row must now have an empty string for the new column
+	// (NOT NULL DEFAULT '').
+	var legacyBaseURL string
+	if err := s.db.QueryRow(
+		`SELECT upstream_base_url FROM virtual_keys WHERE id = ?`,
+		"key_0000000000000001",
+	).Scan(&legacyBaseURL); err != nil {
+		t.Fatalf("select legacy row: %v", err)
+	}
+	if legacyBaseURL != "" {
+		t.Errorf("legacy row upstream_base_url: got %q want empty", legacyBaseURL)
+	}
+
+	// A freshly created key on the migrated DB must be able to persist and
+	// read back a non-empty UpstreamBaseURL.
+	id, _ := GenerateID()
+	token, _ := GenerateToken()
+	vk := &VirtualKey{
+		ID:              id,
+		Token:           token,
+		Name:            "post-migration",
+		Upstream:        UpstreamOpenAI,
+		UpstreamKey:     "sk-post",
+		UpstreamBaseURL: "https://api.together.xyz",
+		CreatedAt:       time.Now().UTC(),
+	}
+	if err := s.Create(context.Background(), vk); err != nil {
+		t.Fatalf("create post-migration key: %v", err)
+	}
+	got, err := s.GetByToken(context.Background(), vk.Token)
+	if err != nil {
+		t.Fatalf("get post-migration key: %v", err)
+	}
+	if got.UpstreamBaseURL != "https://api.together.xyz" {
+		t.Errorf("post-migration round-trip: got %q want https://api.together.xyz",
+			got.UpstreamBaseURL)
+	}
+}
+
+func TestSQLite_ColumnExistsGuard(t *testing.T) {
+	s := newTestSQLite(t)
+	has, err := sqliteColumnExists(s.db, "virtual_keys", "upstream_base_url")
+	if err != nil {
+		t.Fatalf("sqliteColumnExists: %v", err)
+	}
+	if !has {
+		t.Errorf("fresh DB should have upstream_base_url column")
+	}
+	has, err = sqliteColumnExists(s.db, "virtual_keys", "nope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if has {
+		t.Errorf("nonexistent column should return false")
+	}
+	if _, err := sqliteColumnExists(s.db, "virtual_keys; DROP", "id"); err == nil {
+		t.Errorf("expected validation failure on bad table identifier")
 	}
 }
 

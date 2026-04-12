@@ -98,6 +98,61 @@ jobs:
       - name: Build binary
         run: go build -trimpath -ldflags="-s -w" -o /tmp/rein ./cmd/rein
 
+  # Audit-friendly ceiling — dependency caps (#39). Fast Go-only checks
+  # that enforce the direct-deps and compiled-deps guarantees from the
+  # README's Audit-friendly ceiling section on every PR. The image-size
+  # cap is enforced in the docker job below so we only pay for one
+  # docker build per CI run. Breaches fail the build; see the inline
+  # error messages for the budget-increase pattern. No untrusted
+  # github.event.* inputs are consumed in any run: step; all thresholds
+  # are fixed literals in env blocks so the cap history is grep-able.
+  deps-cap:
+    name: deps-cap
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: .go-version
+          cache: true
+      - name: Direct non-stdlib dependency cap
+        env:
+          MAX_DIRECT_DEPS: "1"
+        run: |
+          set -euo pipefail
+          direct=$(awk '
+            /^require \(/ {in_block=1; next}
+            /^\)/ {in_block=0; next}
+            in_block && $0 !~ /indirect/ && NF > 0 {c++}
+            /^require [^(]/ && $0 !~ /indirect/ {c++}
+            END {print c+0}
+          ' go.mod)
+          echo "direct non-stdlib deps: $direct (cap: $MAX_DIRECT_DEPS)"
+          if [ "$direct" -gt "$MAX_DIRECT_DEPS" ]; then
+            echo "::error file=go.mod::Direct non-stdlib dependency count $direct exceeds cap $MAX_DIRECT_DEPS. If intentional, bump MAX_DIRECT_DEPS in .github/workflows/ci.yml in the same commit and add a ### Changed entry to CHANGELOG.md."
+            exit 1
+          fi
+      - name: Compiled production dependency cap
+        env:
+          MAX_COMPILED_DEPS: "15"
+        run: |
+          set -euo pipefail
+          compiled=$(go list -deps -f '{{if and .Module (not .Standard)}}{{.Module.Path}}{{end}}' ./cmd/rein \
+            | sort -u \
+            | grep -v '^github.com/archilea/rein$' \
+            | wc -l \
+            | tr -d ' ')
+          echo "compiled production deps: $compiled (cap: $MAX_COMPILED_DEPS)"
+          if [ "$compiled" -gt "$MAX_COMPILED_DEPS" ]; then
+            echo "::error::Compiled production dependency count $compiled exceeds cap $MAX_COMPILED_DEPS. If intentional, bump MAX_COMPILED_DEPS in .github/workflows/ci.yml in the same commit and add a ### Changed entry to CHANGELOG.md."
+            exit 1
+          fi
+
   docker:
     name: docker
     runs-on: ubuntu-latest
@@ -115,6 +170,28 @@ jobs:
         with:
           context: .
           push: false
+          load: true
           tags: rein:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # Audit-friendly ceiling — image size cap (#39). Internal
+      # early-warning threshold is 15 MiB; public commitment in README is
+      # 20 MB. The 5 MB slack is deliberate so drift is caught in CI
+      # before it burns the public safety margin. docker save | gzip
+      # produces a conservative upper bound within a few percent of
+      # GHCR's compressed manifest size (gzip of uncompressed tar of
+      # already-gzipped layers). Measurement noise is irrelevant for a
+      # cap on an ~12 MB image.
+      - name: Compressed image size cap
+        env:
+          MAX_IMAGE_BYTES: "15728640"
+        run: |
+          set -euo pipefail
+          size=$(docker save rein:ci | gzip -c | wc -c | tr -d ' ')
+          human=$(( size / 1024 / 1024 ))
+          max_human=$(( MAX_IMAGE_BYTES / 1024 / 1024 ))
+          echo "compressed image size: ${size} bytes (~${human} MB, internal cap: ${max_human} MB, public commitment: 20 MB)"
+          if [ "$size" -gt "$MAX_IMAGE_BYTES" ]; then
+            echo "::error::Compressed image size ${size} bytes (~${human} MB) exceeds internal early-warning cap of ${max_human} MB. Public commitment is 20 MB, this CI threshold is tighter on purpose. Investigate the binary size delta; if genuinely unavoidable, bump MAX_IMAGE_BYTES in .github/workflows/ci.yml in the same commit and add a ### Changed entry to CHANGELOG.md."
+            exit 1
+          fi

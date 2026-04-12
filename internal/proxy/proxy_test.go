@@ -22,7 +22,7 @@ func newTestProxy(t *testing.T, store keys.Store, openaiBase, anthropicBase stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), pricer, openaiBase, anthropicBase)
+	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), meter.NewPricerHolder(pricer), openaiBase, anthropicBase)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestProxy_FrozenReturns503(t *testing.T) {
 		t.Fatal(err)
 	}
 	pricer, _ := meter.LoadPricer()
-	p, err := New(store, ks, meter.NewMemory(), pricer, "https://api.openai.com", "https://api.anthropic.com")
+	p, err := New(store, ks, meter.NewMemory(), meter.NewPricerHolder(pricer), "https://api.openai.com", "https://api.anthropic.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestProxy_BudgetExceededReturns402(t *testing.T) {
 	// Seed the meter so the key is already at its daily cap.
 	_ = m.Record(context.Background(), vk.ID, 5.00)
 
-	p, err := New(store, killswitch.NewMemory(), m, pricer, "https://api.openai.com", "https://api.anthropic.com")
+	p, err := New(store, killswitch.NewMemory(), m, meter.NewPricerHolder(pricer), "https://api.openai.com", "https://api.anthropic.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestProxy_SpendIsRecordedAfterUpstream(t *testing.T) {
 	store, vk := newBudgetedKey(t, keys.UpstreamOpenAI, "sk-real", 20.00, 0)
 	pricer, _ := meter.LoadPricer()
 	m := meter.NewMemory()
-	p, err := New(store, killswitch.NewMemory(), m, pricer, upstream.URL, "https://api.anthropic.com")
+	p, err := New(store, killswitch.NewMemory(), m, meter.NewPricerHolder(pricer), upstream.URL, "https://api.anthropic.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +344,7 @@ func TestProxy_OpenAIStreamRecordsSpend(t *testing.T) {
 	store, vk := newBudgetedKey(t, keys.UpstreamOpenAI, "sk-real", 20.00, 0)
 	pricer, _ := meter.LoadPricer()
 	m := meter.NewMemory()
-	p, err := New(store, killswitch.NewMemory(), m, pricer, upstream.URL, "https://api.anthropic.com")
+	p, err := New(store, killswitch.NewMemory(), m, meter.NewPricerHolder(pricer), upstream.URL, "https://api.anthropic.com")
 	if err != nil {
 		t.Fatal(err)
 	}

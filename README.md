@@ -2,9 +2,9 @@
 
 # Rein
 
-### A small, boring cost and safety brake for LLM API traffic.
+### A modern, lightweight reverse proxy for LLMs.
 
-Rein brakes LLM spend at the edge. It is a small Go reverse proxy that sits between your apps and OpenAI or Anthropic, enforcing hard USD budget caps per virtual key, metering spend from streaming and non-streaming responses, and exposing an instant global kill-switch for incident response. Drop it in front of your direct provider calls, or beside your existing AI gateway. Single static Go binary, no CGO. Under 2,000 lines of code. No telemetry, ever.
+Rein is a small, auditable Go reverse proxy that sits between your apps and the major LLM providers. It swaps virtual keys for real upstream credentials at the edge, meters token spend from streaming and non-streaming responses, enforces hard USD budget caps per key, and exposes an instant global kill-switch for incident response. Native adapters ship for OpenAI and Anthropic, with a per-key base URL override for any OpenAI-compatible provider. Single static binary, pure Go, no CGO. No telemetry, ever.
 
 [![CI](https://github.com/archilea/rein/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/archilea/rein/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
@@ -21,28 +21,29 @@ Rein brakes LLM spend at the edge. It is a small Go reverse proxy that sits betw
 
 ## Core features
 
-The two brakes:
+Reverse proxy:
 
-1. **Hard budget caps** per virtual key, daily and monthly USD. Rein checks accumulated spend before every upstream fetch; breach returns `402 Payment Required` and the upstream is never called.
-2. **Instant global kill-switch** via `POST /admin/v1/killswitch`. One HTTP call and every `/v1/*` request returns `503 Service Unavailable` with `Retry-After: 60` until someone unfreezes, regardless of key or model. It's a single `atomic.Bool` read on the hot path, effectively free when off, instant when on. No restart, no config edit.
+1. **Reverse proxy** for OpenAI (`/v1/chat/*`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, `/v1/audio/*`, `/v1/images/*`) and Anthropic (`/v1/messages`). Streaming-aware with pure passthrough. Per-key upstream base URL override unlocks any OpenAI-compatible provider without additional adapter code.
+2. **Virtual keys** (`rein_live_*`) that wrap your real upstream credentials. Clients never see the upstream key. Rotating a compromised credential is one admin API call; old rein tokens keep working until you revoke them.
+3. **Admin API** for virtual key create, list, revoke, and kill-switch, all protected by a single bearer token compared in constant time.
 
-What keeps the brakes honest:
+Cost and safety controls:
 
-3. **Spend metering** from both JSON and SSE streaming responses, priced against an embedded pricing table that was verified against OpenAI and Anthropic vendor docs. Dated model snapshots (`claude-opus-4-5-20251101`, `gpt-4o-2024-08-06`) resolve to their base entries automatically, so new model releases do not break metering.
-4. **Streaming usage auto-inject.** For OpenAI chat completions, Rein injects `stream_options.include_usage: true` into the outbound body so the upstream returns a final usage chunk. Streaming clients cannot silently bypass budget enforcement. An explicit client opt-out is respected and logged.
+4. **Hard budget caps** per virtual key, daily and monthly USD. Rein checks accumulated spend before every upstream fetch; breach returns `402 Payment Required` and the upstream is never called.
+5. **Instant global kill-switch** via `POST /admin/v1/killswitch`. One HTTP call and every `/v1/*` request returns `503 Service Unavailable` with `Retry-After: 60` until someone unfreezes. A single `atomic.Bool` read on the hot path, effectively free when off, instant when on.
+6. **Spend metering** from both JSON and SSE streaming responses, priced against an embedded pricing table verified against OpenAI and Anthropic vendor docs. Dated model snapshots (`claude-opus-4-5-20251101`, `gpt-4o-2024-08-06`) resolve to their base entries automatically.
+7. **Streaming usage auto-inject.** For OpenAI chat completions, Rein injects `stream_options.include_usage: true` into the outbound body so streaming clients cannot silently bypass budget enforcement. An explicit client opt-out is respected and logged.
 
-Supporting machinery:
+Operational foundation:
 
-5. **Virtual keys** (`rein_live_*`) that wrap your real upstream credentials. Clients never see the upstream key. Rotating a compromised credential is one admin API call; old rein tokens keep working until you revoke them.
-6. **Encryption at rest** for the upstream key column using AES-256-GCM. Rein refuses to start without `REIN_ENCRYPTION_KEY`, so plaintext credentials cannot land on disk by accident. Ciphertext carries a `v1:` tag so future algorithm rotations do not require a schema migration.
-7. **Reverse proxy** for OpenAI (`/v1/chat/*`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, `/v1/audio/*`, `/v1/images/*`) and Anthropic (`/v1/messages`). Streaming-aware with pure passthrough. No request body rewriting except the auto-inject described above.
 8. **Durable SQLite keystore** via `modernc.org/sqlite` (pure Go, no CGO). WAL mode enabled. Single static binary deploys anywhere.
-9. **Admin API** for virtual key create, list, revoke, and kill-switch, all protected by a single bearer token compared in constant time.
+9. **Encryption at rest** for the upstream key column using AES-256-GCM. Rein refuses to start without `REIN_ENCRYPTION_KEY`, so plaintext credentials cannot land on disk by accident. Ciphertext carries a `v1:` tag so future algorithm rotations do not require a schema migration.
 
 ## Who this is for
 
 Rein exists specifically for teams who:
 
+- Want a **lightweight reverse proxy** as their first layer in front of direct provider calls, not a refactor target
 - Already call their LLM provider SDK directly and **do not want to refactor to a schema-translation gateway**
 - **Already run an AI gateway of any shape** and want an independent safety net that platform or SRE can trigger without touching the AI team's stack
 - Want a proxy **small enough that their security team can audit it end-to-end in an afternoon**
@@ -58,11 +59,19 @@ Rein exists specifically for teams who:
 - **Ship a dashboard or web UI.** The admin interface is a small HTTP API, driven by `curl` or whatever client your team already uses. Every UI is a supply chain we do not want to own on top of a brake. Full cookbook in [docs/admin-api.md](docs/admin-api.md).
 - **Telemetry.** Rein will never phone home. This is a hard commitment, not a current default.
 
-## Size guarantee
+## Audit-friendly ceiling
 
-Rein is intentionally small. The entire codebase is under 2,000 lines of Go. You can read it end-to-end in an afternoon, and a security review can cover every line. The pricing table is embedded JSON, not Go code, so the codebase stays focused on behavior.
+Rein is intentionally small. A security review can cover every line in an afternoon. The disciplines we enforce in CI to keep it that way are a ceiling on direct non-stdlib dependencies, a ceiling on the number of modules that reach the production binary, and a ceiling on compressed image size. These are internal design targets, not a public SLA: they exist because drift is easier to catch early than it is to reverse.
 
-If a feature would push Rein past this ceiling, it does not belong here. We will document the pattern in an issue and point you at a complementary tool that already solves it.
+**Current state**, as of the latest release:
+
+- **1 direct non-stdlib dependency** (`modernc.org/sqlite`)
+- **8 compiled production modules** (measured with `go list -deps ./cmd/rein` on Linux, excluding stdlib and test-only deps)
+- **~12 MB compressed amd64 image**
+
+If those numbers change materially in a future release, the `CHANGELOG.md` entry for that release will say why. The specific CI thresholds live in `.github/workflows/ci.yml` as grep-able literals so the history of every budget change is visible in `git log` on that file.
+
+Source LOC is not a pinned number. It is a private design forcing-function we use when sizing proposals. If a feature would push Rein past an audit-friendly shape, it does not belong here. We will document the pattern in an issue and point you at a complementary tool that already solves it.
 
 ## Works with
 
@@ -70,7 +79,7 @@ Rein is designed as a **sidecar**, not a replacement. It sits between your appli
 
 | Setup | How Rein fits |
 |---|---|
-| Direct OpenAI / Anthropic SDK calls | Point the SDK's `base_url` at Rein. Two env vars. |
+| Direct SDK calls to any supported provider | Point the SDK's `base_url` at Rein. Two env vars. |
 | AI gateway already in place | Put Rein in front of your existing gateway for an independent kill-switch SRE can trigger without touching the gateway's config. See the [model aliases caveat](#note-on-model-aliases-in-front-end-gateways) below before enabling budgets. |
 | Custom in-house gateway | Rein can sit on either side depending on what you want audited end-to-end. |
 
@@ -166,7 +175,7 @@ Two things to know, because honesty is the whole point of this project:
 
 2. **0.1 uses an in-process meter that resets on restart.** Spend totals live in memory. If the Rein process crashes and restarts, counters reset to zero. This is fine for single-replica deployments where a crash means a deliberate restart, and disastrous for loops that would otherwise climb indefinitely. A SQLite-backed durable meter is the top item on the 0.2 roadmap. Set a conservative cap and pin a single replica until it lands.
 
-Budgets use the embedded pricing table under `internal/meter/pricing.json`, which was verified against vendor docs on the date shown in the `fetched_at` field. Verify against your own account's pricing before turning on caps in production. Unknown or newly released models are logged and skipped (they do not count toward spend) so a new model release never breaks the proxy.
+Budgets use the embedded pricing table under `internal/meter/pricing.json`, which was verified against vendor docs on the date shown in the `fetched_at` field. Verify against your own account's pricing before turning on caps in production. Unknown or newly released models are logged and skipped (they do not count toward spend) so a new model release never breaks the proxy. Operators who want to **override a vendor price** (out-of-date embedded value, or a custom rate from their account) or **add pricing for a provider-specific model** (Groq's `llama-3.3-70b-versatile`, Fireworks models, DeepSeek, etc.) can drop a `rein.json` at `/etc/rein/rein.json` — or point at any path via `REIN_CONFIG_FILE` — and reload with `SIGHUP`. See [docs/quickstart.md § 3b](docs/quickstart.md) for the full file format, hybrid resolution rules, and Kubernetes ConfigMap guidance.
 
 **Streaming** is fully supported. Rein tees SSE response bodies as they flow to your client and parses the token usage chunks in line. For OpenAI chat completions, Rein automatically injects `stream_options.include_usage: true` into the outbound request body so the upstream returns a final usage chunk (the client sees the stream unchanged). For Anthropic, usage is parsed from the native `message_start` and `message_delta` events. If a client explicitly sets `stream_options.include_usage: false` on an OpenAI request, Rein respects that choice and logs a warning: spend for that request will not be recorded.
 
@@ -298,6 +307,8 @@ Rein is configured via environment variables. Only `REIN_ADMIN_TOKEN` is require
 | `REIN_ENCRYPTION_KEY` | _(required for sqlite)_ | 64-char hex (32 bytes) AES-256-GCM key for at-rest encryption |
 | `REIN_OPENAI_BASE` | `https://api.openai.com` | OpenAI upstream override |
 | `REIN_ANTHROPIC_BASE` | `https://api.anthropic.com` | Anthropic upstream override |
+| `REIN_CONFIG_FILE` | _(unset)_ | Operator-editable pricing overrides file. If unset, Rein probes `/etc/rein/rein.json`; if that is also absent, runs against just the embedded pricing table. See [docs/quickstart.md § 3b](docs/quickstart.md). |
+| `REIN_CONFIG_POLL_INTERVAL` | _(unset)_ | Opt-in background poll interval for `REIN_CONFIG_FILE`. Duration in Go `time.ParseDuration` form (e.g. `30s`, `5m`). Bounded to `[1s, 1h]`; out-of-range values fail at startup. Unset means SIGHUP-only reload. |
 
 ## Roadmap
 
@@ -312,6 +323,9 @@ Kept deliberately short. Features that would break the size ceiling are not here
 - [x] `0.1` Budget enforcement (daily and monthly caps per key)
 - [x] `0.1` Embedded vendor-verified pricing table for OpenAI and Anthropic
 - [x] `0.1` Streaming token usage extraction (SSE) for OpenAI and Anthropic
+- [x] `0.2` Per-key upstream base URL override for any OpenAI-compatible provider (Groq, Fireworks, OpenRouter, DeepSeek, xAI, local vLLM/Ollama, ...)
+- [x] `0.2` Operator-editable pricing overrides with SIGHUP + poll-based hot reload
+- [x] `0.2` CI-enforced audit-friendly ceilings (direct dep count, compiled dep count, compressed image size)
 - [ ] `0.2` Durable SQLite-backed meter (spend survives restart)
 - [ ] `0.2` Encryption key rotation tool
 - [ ] `0.3` Slack / Discord / webhook alerts at budget thresholds
@@ -320,7 +334,7 @@ Kept deliberately short. Features that would break the size ceiling are not here
 
 Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the flow. Issues tagged `good first issue` are a good place to start.
 
-Scope-of-work expectations: Rein stays small. If your PR adds more than a few hundred lines, please open an issue first so we can agree it fits the identity.
+Scope-of-work expectations: Rein stays small. If your PR adds more than a few hundred lines, please open an issue first so we can agree it fits the identity. This is reviewer-fatigue guidance, not a hard cap. The enforced size bounds are direct dependency count and compressed image size, not source LOC (see [Audit-friendly ceiling](#audit-friendly-ceiling)).
 
 ## Security
 
@@ -334,7 +348,7 @@ Found a vulnerability? Please do not open a public issue. Email `security@archil
 
 Rein is a specific shape: a small, auditable reverse proxy that does a deliberately short list of things. The differentiators are architectural, not feature-count.
 
-- **Under 2,000 lines of Go** in a single static binary. A security team can read it end-to-end in an afternoon. The pricing table is embedded JSON, not Go code, so the binary stays focused on behavior.
+- **Small on purpose.** CI-enforced ceilings on dependency count and compressed image size keep supply-chain surface tight; a security team can read the whole codebase end-to-end in an afternoon. Current state is published under [Audit-friendly ceiling](#audit-friendly-ceiling) each release. The pricing table is embedded JSON, not Go code, so the binary stays focused on behavior.
 - **Pure Go, no CGO.** No Python runtime, no dependency conflicts, no base-image surprises. Runs as a sidecar next to anything.
 - **No telemetry, ever.** A hard commitment as a core identity, not a config flag you can turn off later.
 - **AES-256-GCM encryption at rest by default.** The process refuses to start without an encryption key, so plaintext credentials cannot land on disk by accident.
@@ -346,8 +360,16 @@ Staying narrow is the product. If Rein grew a dashboard, a routing layer, or a p
 
 ---
 
+## Contributors
+
+<a href="https://github.com/archilea/rein/graphs/contributors">
+  <img src="https://stg.contrib.rocks/image?repo=archilea/rein" alt="Rein contributors" />
+</a>
+
+---
+
 <div align="center">
 
-*Built with intent by [Archilea](https://archilea.com).*
+*Maintained by [Archilea](https://archilea.com) and contributors.*
 
 </div>
