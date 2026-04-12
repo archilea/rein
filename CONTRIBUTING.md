@@ -24,8 +24,18 @@ Rein requires Go 1.25 or newer (this is also the lowest version that still recei
 1. Fork the repository and create a branch from `main`.
 2. Make your change. Add tests if it is a code change.
 3. Run `make lint test` locally.
-4. Open a pull request using the PR template.
-5. A maintainer will review within a few days. We aim to respond within 72 hours on weekdays.
+4. Open a pull request using the PR template. Link the issue with `Closes #N` or `Fixes #N`.
+5. Ensure CI is green. The following checks run on every PR:
+   - `lint` (golangci-lint)
+   - `test` (race detector + coverage)
+   - `build` (binary compilation)
+   - `hadolint` (Dockerfile lint)
+   - `deps-cap` (dependency count limits)
+   - `docker` (image build + size cap)
+   - `codeql` (static security analysis)
+   - `zizmor` (GitHub Actions security)
+   - GitHub secret scanning with push protection (blocks secrets before they land)
+6. A maintainer will review within a few days. We aim to respond within 72 hours on weekdays.
 
 ## Coding conventions
 
