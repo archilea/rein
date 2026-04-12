@@ -4,7 +4,7 @@
 // (REIN_ADMIN_TOKEN). Constant-time comparison is used to avoid leaking the
 // token via timing side-channels.
 //
-// Administrative capabilities include kill-switch control and virtual key 
+// Administrative capabilities include kill-switch control and virtual key
 // management (CRUD operations for OpenAI/Anthropic keys with budget controls).
 package admin
 
