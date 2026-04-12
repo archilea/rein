@@ -40,6 +40,46 @@ func TestLoad_RequiresAdminToken(t *testing.T) {
 	}
 }
 
+func TestLoad_PortValidBoundaries(t *testing.T) {
+	cases := []string{"1", "8080", "65535"}
+	for _, tc := range cases {
+		t.Run(tc, func(t *testing.T) {
+			requireAdminToken(t)
+			t.Setenv("REIN_PORT", tc)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("unexpected error for port %s: %v", tc, err)
+			}
+			if cfg.Port != tc {
+				t.Errorf("Port: got %q want %q", cfg.Port, tc)
+			}
+		})
+	}
+}
+
+func TestLoad_PortInvalidIsFatal(t *testing.T) {
+	cases := []string{
+		"0",
+		"-1",
+		"65536",
+		"80 80",
+		"abc",
+	}
+	for _, tc := range cases {
+		t.Run(tc, func(t *testing.T) {
+			requireAdminToken(t)
+			t.Setenv("REIN_PORT", tc)
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("expected error for invalid port %q", tc)
+			}
+			if !strings.Contains(err.Error(), "must be an integer between 1 and 65535") {
+				t.Errorf("error should mention range: %v", err)
+			}
+		})
+	}
+}
+
 func TestLoad_ConfigFileUnsetMeansEmpty(t *testing.T) {
 	requireAdminToken(t)
 	cfg, err := Load()
