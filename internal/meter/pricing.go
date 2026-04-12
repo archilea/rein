@@ -50,6 +50,17 @@ func LoadPricer() (*Pricer, error) {
 // their undated table entry without maintaining an alias per snapshot.
 var dateSuffix = regexp.MustCompile(`-\d{8}$|-\d{4}-\d{2}-\d{2}$`)
 
+// Len returns the total number of (upstream, model) pairs in the pricing
+// table. Used by the config reload logger so operators can tell at a
+// glance whether a reload succeeded and how large the active snapshot is.
+func (p *Pricer) Len() int {
+	n := 0
+	for _, table := range p.models {
+		n += len(table)
+	}
+	return n
+}
+
 // Cost returns the USD cost for a response with the given token counts.
 // ok is false if the (upstream, model) pair is not in the table.
 func (p *Pricer) Cost(upstream, model string, inputTokens, outputTokens int) (float64, bool) {
