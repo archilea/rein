@@ -122,6 +122,33 @@ export OPENAI_API_KEY=rein_live_...
 export OPENAI_BASE_URL=http://localhost:8080/v1
 ```
 
+Anthropic works the same way. Rein handles the header translation automatically.
+
+```bash
+# Mint a virtual key for Anthropic
+curl -X POST http://localhost:8080/admin/v1/keys \
+  -H "Authorization: Bearer $REIN_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "claude-app",
+    "upstream": "anthropic",
+    "upstream_key": "sk-ant-your-real-anthropic-key"
+  }'
+
+# Call Claude through Rein (always use Authorization: Bearer, not x-api-key)
+curl http://localhost:8080/v1/messages \
+  -H "Authorization: Bearer rein_live_..." \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 256,
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+Inbound requests to Rein always use `Authorization: Bearer rein_live_...` regardless of the upstream provider. Rein translates to the correct upstream format (`Authorization: Bearer` for OpenAI, `x-api-key` for Anthropic) on the outbound side.
+
 The `token` is returned once, on create. Rein never shows it again: list and get responses omit the token and the upstream key entirely. Store it in your secret manager the moment you see it.
 
 Keys are persisted in a local SQLite database (`./rein.db` by default). The `upstream_key` column is encrypted at rest with AES-256-GCM using `REIN_ENCRYPTION_KEY`. Rein refuses to start if the key is missing, so plaintext credentials can never land on disk by accident. Lose the encryption key and the database becomes unreadable: treat it like any other root secret. Override the DB location with `REIN_DB_URL=sqlite:/var/lib/rein/rein.db`, or use `REIN_DB_URL=memory` for an ephemeral in-memory store.
