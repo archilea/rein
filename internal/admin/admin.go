@@ -124,6 +124,8 @@ type keyView struct {
 	Upstream        string     `json:"upstream"`
 	DailyBudgetUSD  float64    `json:"daily_budget_usd"`
 	MonthBudgetUSD  float64    `json:"month_budget_usd"`
+	RPSLimit        int        `json:"rps_limit"`
+	RPMLimit        int        `json:"rpm_limit"`
 	UpstreamBaseURL string     `json:"upstream_base_url,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
 	RevokedAt       *time.Time `json:"revoked_at,omitempty"`
@@ -136,6 +138,8 @@ func viewOf(k *keys.VirtualKey) keyView {
 		Upstream:        k.Upstream,
 		DailyBudgetUSD:  k.DailyBudgetUSD,
 		MonthBudgetUSD:  k.MonthBudgetUSD,
+		RPSLimit:        k.RPSLimit,
+		RPMLimit:        k.RPMLimit,
 		UpstreamBaseURL: k.UpstreamBaseURL,
 		CreatedAt:       k.CreatedAt,
 		RevokedAt:       k.RevokedAt,
@@ -156,6 +160,8 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		UpstreamKey     string  `json:"upstream_key"`
 		DailyBudgetUSD  float64 `json:"daily_budget_usd"`
 		MonthBudgetUSD  float64 `json:"month_budget_usd"`
+		RPSLimit        int     `json:"rps_limit"`
+		RPMLimit        int     `json:"rpm_limit"`
 		UpstreamBaseURL string  `json:"upstream_base_url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -182,6 +188,10 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.DailyBudgetUSD < 0 || body.MonthBudgetUSD < 0 {
 		http.Error(w, "budgets must be non-negative", http.StatusBadRequest)
+		return
+	}
+	if body.RPSLimit < 0 || body.RPMLimit < 0 {
+		http.Error(w, "rate limits must be non-negative", http.StatusBadRequest)
 		return
 	}
 	// Per-key upstream base URL override. Only meaningful for the OpenAI
@@ -229,6 +239,8 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		UpstreamKey:     body.UpstreamKey,
 		DailyBudgetUSD:  body.DailyBudgetUSD,
 		MonthBudgetUSD:  body.MonthBudgetUSD,
+		RPSLimit:        body.RPSLimit,
+		RPMLimit:        body.RPMLimit,
 		UpstreamBaseURL: canonicalBaseURL,
 		CreatedAt:       time.Now().UTC(),
 	}
