@@ -1,0 +1,51 @@
+name: Feature request
+description: Suggest a small, well-scoped feature that fits Rein's narrow identity
+title: "feat: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Rein stays small on purpose. Before you file, skim [README.md#what-rein-deliberately-does-not-do](../../README.md#what-rein-deliberately-does-not-do), the [roadmap](../../README.md#roadmap), and the [audit-friendly ceiling](../../README.md#audit-friendly-ceiling).
+
+        **Is this really a feature request?**
+        - If the idea needs a design decision with real tradeoffs (multiple valid approaches, a new runtime dependency, changes to the hot path), please use the **RFC / design proposal** template instead.
+        - If you are reporting something broken or not working as documented, use the **Bug report** template instead.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What cannot you do today, or what hurts? Name the user, name the pain. Do not jump to a solution here.
+      placeholder: |
+        When I run Rein behind X, I cannot Y because Z.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What you would like Rein to do. Keep it short. A maintainer will ask for detail if this passes triage.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other options did you consider? Workarounds outside Rein also count. Leave blank if none.
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope check
+      description: Roughly how many lines of code / files / packages does this touch? Any new runtime dependencies? Any hot-path impact? If you are not sure, guess. This helps maintainers triage quickly.
+      placeholder: |
+        ~50 lines across internal/X. No new deps. Not on the hot path.
+    validations:
+      required: true
+  - type: textarea
+    id: grounding
+    attributes:
+      label: Grounding
+      description: Point at file:line references, roadmap items, or existing discussions that justify this work. If the only justification is "it would be nice," say so honestly.
+      placeholder: |
+        - README.md:340 (roadmap)
+        - internal/proxy/proxy.go:172 (insertion point)
