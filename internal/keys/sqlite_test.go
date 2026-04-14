@@ -410,6 +410,231 @@ func TestSQLite_UpstreamBaseURLMigrationFromPre02Schema(t *testing.T) {
 	}
 }
 
+// TestSQLite_RateLimitFieldsRoundtrip verifies that a key's RPSLimit and
+// RPMLimit fields persist through SQLite write and read, including both
+// zero (unlimited) and non-zero values.
+func TestSQLite_RateLimitFieldsRoundtrip(t *testing.T) {
+	s := newTestSQLite(t)
+
+	// Key with explicit rate limits set.
+	id1, _ := GenerateID()
+	token1, _ := GenerateToken()
+	vk1 := &VirtualKey{
+		ID:          id1,
+		Token:       token1,
+		Name:        "with-limits",
+		Upstream:    UpstreamOpenAI,
+		UpstreamKey: "sk-real",
+		RPSLimit:    10,
+		RPMLimit:    300,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := s.Create(context.Background(), vk1); err != nil {
+		t.Fatalf("create with limits: %v", err)
+	}
+	got1, err := s.GetByToken(context.Background(), token1)
+	if err != nil {
+		t.Fatalf("get with limits: %v", err)
+	}
+	if got1.RPSLimit != 10 {
+		t.Errorf("RPSLimit roundtrip: got %d want 10", got1.RPSLimit)
+	}
+	if got1.RPMLimit != 300 {
+		t.Errorf("RPMLimit roundtrip: got %d want 300", got1.RPMLimit)
+	}
+
+	// Key with zero limits (unlimited). Must also roundtrip as zero.
+	id2, _ := GenerateID()
+	token2, _ := GenerateToken()
+	vk2 := &VirtualKey{
+		ID:          id2,
+		Token:       token2,
+		Name:        "unlimited",
+		Upstream:    UpstreamOpenAI,
+		UpstreamKey: "sk-real",
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := s.Create(context.Background(), vk2); err != nil {
+		t.Fatalf("create unlimited: %v", err)
+	}
+	got2, err := s.GetByToken(context.Background(), token2)
+	if err != nil {
+		t.Fatalf("get unlimited: %v", err)
+	}
+	if got2.RPSLimit != 0 || got2.RPMLimit != 0 {
+		t.Errorf("unlimited key: got RPS=%d RPM=%d want 0/0", got2.RPSLimit, got2.RPMLimit)
+	}
+
+	// List must return both keys with their rate limits intact.
+	list, err := s.List(context.Background())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("list len: got %d want 2", len(list))
+	}
+	byID := map[string]*VirtualKey{}
+	for _, k := range list {
+		byID[k.ID] = k
+	}
+	if byID[id1].RPSLimit != 10 || byID[id1].RPMLimit != 300 {
+		t.Errorf("list: key1 rate limits incorrect: RPS=%d RPM=%d",
+			byID[id1].RPSLimit, byID[id1].RPMLimit)
+	}
+	if byID[id2].RPSLimit != 0 || byID[id2].RPMLimit != 0 {
+		t.Errorf("list: key2 rate limits incorrect: RPS=%d RPM=%d",
+			byID[id2].RPSLimit, byID[id2].RPMLimit)
+	}
+}
+
+// TestSQLite_RateLimitMigrationIdempotent verifies that reopening a DB
+// runs the rps_limit and rpm_limit migrations without error or duplicate
+// columns.
+func TestSQLite_RateLimitMigrationIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rate-limit-migrate.db")
+	c := mustAESGCM(t)
+	s1, err := NewSQLite(path, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = s1.Close()
+
+	// Reopen: migrations run again and must not fail.
+	s2, err := NewSQLite(path, c)
+	if err != nil {
+		t.Fatalf("reopen after migration: %v", err)
+	}
+	t.Cleanup(func() { _ = s2.Close() })
+
+	// Confirm both columns are present by writing and reading values.
+	id, _ := GenerateID()
+	token, _ := GenerateToken()
+	vk := &VirtualKey{
+		ID:          id,
+		Token:       token,
+		Name:        "m",
+		Upstream:    UpstreamOpenAI,
+		UpstreamKey: "sk-m",
+		RPSLimit:    5,
+		RPMLimit:    250,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := s2.Create(context.Background(), vk); err != nil {
+		t.Fatalf("create after reopen: %v", err)
+	}
+	got, err := s2.GetByToken(context.Background(), vk.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RPSLimit != 5 || got.RPMLimit != 250 {
+		t.Errorf("rate limits after reopen: got RPS=%d RPM=%d want 5/250",
+			got.RPSLimit, got.RPMLimit)
+	}
+}
+
+// TestSQLite_RateLimitMigrationFromPreExistingSchema exercises the
+// !sqliteColumnExists branch of applySQLiteMigrations for rps_limit and
+// rpm_limit by physically materializing a schema without those columns
+// at a temp path, closing the raw handle, and then opening via NewSQLite.
+// The migration must run ALTER TABLE ADD COLUMN for both columns and
+// leave the DB in a state where a VirtualKey with rate limits round-trips
+// correctly.
+func TestSQLite_RateLimitMigrationFromPreExistingSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pre-rate-limit.db")
+
+	// Create a schema that has upstream_base_url but no rps_limit/rpm_limit.
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)",
+		url.PathEscape(path))
+	raw, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	const preRateLimitSchema = `
+		CREATE TABLE virtual_keys (
+			id                 TEXT PRIMARY KEY,
+			token              TEXT NOT NULL UNIQUE,
+			name               TEXT NOT NULL,
+			upstream           TEXT NOT NULL,
+			upstream_key       TEXT NOT NULL,
+			daily_budget_usd   REAL NOT NULL DEFAULT 0,
+			month_budget_usd   REAL NOT NULL DEFAULT 0,
+			upstream_base_url  TEXT NOT NULL DEFAULT '',
+			created_at         TEXT NOT NULL,
+			revoked_at         TEXT
+		);`
+	if _, err := raw.Exec(preRateLimitSchema); err != nil {
+		t.Fatalf("create pre-rate-limit schema: %v", err)
+	}
+	// Insert a legacy row using the column set that lacks rate limit columns.
+	if _, err := raw.Exec(`INSERT INTO virtual_keys
+		(id, token, name, upstream, upstream_key,
+		 daily_budget_usd, month_budget_usd, upstream_base_url, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"key_0000000000000002", "rein_live_legacy_rl", "legacy-rl",
+		UpstreamOpenAI, "legacy-ciphertext-placeholder",
+		0.0, 0.0, "", time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw handle: %v", err)
+	}
+
+	// Open via NewSQLite. Migration must add both columns.
+	s, err := NewSQLite(path, mustAESGCM(t))
+	if err != nil {
+		t.Fatalf("open pre-rate-limit db via NewSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	for _, col := range []string{"rps_limit", "rpm_limit"} {
+		has, err := sqliteColumnExists(s.db, "virtual_keys", col)
+		if err != nil {
+			t.Fatalf("column exists check %s: %v", col, err)
+		}
+		if !has {
+			t.Errorf("migration did not add %s column", col)
+		}
+	}
+
+	// Legacy row must have default zero values for both new columns.
+	var legacyRPS, legacyRPM int
+	if err := s.db.QueryRow(
+		`SELECT rps_limit, rpm_limit FROM virtual_keys WHERE id = ?`,
+		"key_0000000000000002",
+	).Scan(&legacyRPS, &legacyRPM); err != nil {
+		t.Fatalf("select legacy row: %v", err)
+	}
+	if legacyRPS != 0 || legacyRPM != 0 {
+		t.Errorf("legacy row rate limits: got RPS=%d RPM=%d want 0/0",
+			legacyRPS, legacyRPM)
+	}
+
+	// A freshly created key on the migrated DB must persist non-zero limits.
+	id, _ := GenerateID()
+	token, _ := GenerateToken()
+	vk := &VirtualKey{
+		ID:          id,
+		Token:       token,
+		Name:        "post-migration-rl",
+		Upstream:    UpstreamOpenAI,
+		UpstreamKey: "sk-post",
+		RPSLimit:    20,
+		RPMLimit:    600,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := s.Create(context.Background(), vk); err != nil {
+		t.Fatalf("create post-migration key: %v", err)
+	}
+	got, err := s.GetByToken(context.Background(), vk.Token)
+	if err != nil {
+		t.Fatalf("get post-migration key: %v", err)
+	}
+	if got.RPSLimit != 20 || got.RPMLimit != 600 {
+		t.Errorf("post-migration roundtrip: got RPS=%d RPM=%d want 20/600",
+			got.RPSLimit, got.RPMLimit)
+	}
+}
+
 func TestSQLite_ColumnExistsGuard(t *testing.T) {
 	s := newTestSQLite(t)
 	has, err := sqliteColumnExists(s.db, "virtual_keys", "upstream_base_url")

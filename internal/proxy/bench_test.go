@@ -13,6 +13,7 @@ import (
 	"github.com/archilea/rein/internal/keys"
 	"github.com/archilea/rein/internal/killswitch"
 	"github.com/archilea/rein/internal/meter"
+	"github.com/archilea/rein/internal/rates"
 )
 
 // These benchmarks measure Rein's own code overhead using an in-process mock
@@ -107,7 +108,7 @@ func benchSetupOverride(b *testing.B, useSQLite, withBudget bool, upstream *http
 	if err != nil {
 		b.Fatal(err)
 	}
-	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), meter.NewPricerHolder(pricer), proxyOpenAIBase, "https://api.anthropic.com")
+	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), nil, meter.NewPricerHolder(pricer), proxyOpenAIBase, "https://api.anthropic.com")
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -237,7 +238,7 @@ func BenchmarkRein_Frozen(b *testing.B) {
 	_ = ks.SetFrozen(context.Background(), true)
 
 	pricer, _ := meter.LoadPricer()
-	p, _ := New(store, ks, meter.NewMemory(), meter.NewPricerHolder(pricer), up.URL, "https://api.anthropic.com")
+	p, _ := New(store, ks, meter.NewMemory(), nil, meter.NewPricerHolder(pricer), up.URL, "https://api.anthropic.com")
 	rein := httptest.NewServer(p)
 	b.Cleanup(rein.Close)
 
@@ -268,4 +269,50 @@ func BenchmarkRein_Frozen(b *testing.B) {
 			}
 		}
 	})
+}
+
+// benchSetupWithRates variant mints a key with rate limits set.
+func benchSetupWithRates(b *testing.B, useSQLite bool, upstream *httptest.Server, rpsLimit, rpmLimit int) (string, string) {
+	b.Helper()
+	store := buildStore(b, useSQLite)
+	id, _ := keys.GenerateID()
+	token, _ := keys.GenerateToken()
+	vk := &keys.VirtualKey{
+		ID: id, Token: token, Name: "bench-rl",
+		Upstream: keys.UpstreamOpenAI, UpstreamKey: "sk-fake",
+		DailyBudgetUSD: 1_000_000, MonthBudgetUSD: 1_000_000,
+		RPSLimit: rpsLimit, RPMLimit: rpmLimit,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := store.Create(context.Background(), vk); err != nil {
+		b.Fatal(err)
+	}
+	pricer, err := meter.LoadPricer()
+	if err != nil {
+		b.Fatal(err)
+	}
+	rl := rates.NewMemory()
+	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), rl, meter.NewPricerHolder(pricer), upstream.URL, "https://api.anthropic.com")
+	if err != nil {
+		b.Fatal(err)
+	}
+	rein := httptest.NewServer(p)
+	b.Cleanup(rein.Close)
+	return rein.URL, token
+}
+
+// Full hot path with rate limiting enabled, high limits so no rejection.
+func BenchmarkRein_SQLite_WithBudget_RateLimited_ZeroLatency(b *testing.B) {
+	up := mockUpstream()
+	b.Cleanup(up.Close)
+	url, tok := benchSetupWithRates(b, true, up, 1_000_000, 60_000_000)
+	drive200(b, url, tok)
+}
+
+// In-memory keystore with rate limiting, isolates rate limiter cost.
+func BenchmarkRein_MemStore_WithBudget_RateLimited_ZeroLatency(b *testing.B) {
+	up := mockUpstream()
+	b.Cleanup(up.Close)
+	url, tok := benchSetupWithRates(b, false, up, 1_000_000, 60_000_000)
+	drive200(b, url, tok)
 }

@@ -433,3 +433,46 @@ func TestAdmin_Keys_RequireAuth(t *testing.T) {
 		t.Errorf("got %d want 401", rec.Code)
 	}
 }
+
+func TestAdmin_CreateKey_NegativeRateLimitRejected(t *testing.T) {
+	_, _, _, mux := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/v1/keys",
+		strings.NewReader(`{"name":"bad","upstream":"openai","upstream_key":"sk-x","rps_limit":-1}`))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("negative rps_limit: got %d want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdmin_CreateKey_RateLimitsInResponse(t *testing.T) {
+	_, _, _, mux := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/v1/keys",
+		strings.NewReader(`{"name":"rl-key","upstream":"openai","upstream_key":"sk-x","rps_limit":10,"rpm_limit":300}`))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: got %d want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		RPSLimit int `json:"rps_limit"`
+		RPMLimit int `json:"rpm_limit"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.RPSLimit != 10 {
+		t.Errorf("rps_limit: got %d want 10", resp.RPSLimit)
+	}
+	if resp.RPMLimit != 300 {
+		t.Errorf("rpm_limit: got %d want 300", resp.RPMLimit)
+	}
+}

@@ -80,8 +80,8 @@ budgets on the way back.
 ### Mint a new key
 
 `name` and `upstream_key` are required. `upstream` must be `openai` or
-`anthropic`. Budgets are optional and default to zero, which is treated as
-unlimited.
+`anthropic`. Budgets and rate limits are optional and default to zero, which is
+treated as unlimited.
 
 ```bash
 curl -X POST "$REIN_URL/admin/v1/keys" \
@@ -92,7 +92,9 @@ curl -X POST "$REIN_URL/admin/v1/keys" \
     "upstream": "openai",
     "upstream_key": "sk-your-real-openai-key",
     "daily_budget_usd": 100,
-    "month_budget_usd": 2000
+    "month_budget_usd": 2000,
+    "rps_limit": 10,
+    "rpm_limit": 300
   }'
 ```
 
@@ -106,6 +108,8 @@ Response:
   "upstream": "openai",
   "daily_budget_usd": 100,
   "month_budget_usd": 2000,
+  "rps_limit": 10,
+  "rpm_limit": 300,
   "created_at": "2026-04-10T12:00:00Z"
 }
 ```
@@ -135,6 +139,8 @@ Response:
       "upstream": "openai",
       "daily_budget_usd": 100,
       "month_budget_usd": 2000,
+      "rps_limit": 10,
+      "rpm_limit": 300,
       "created_at": "2026-04-10T12:00:00Z"
     }
   ]
@@ -146,7 +152,7 @@ Pipe through `jq` for a readable operator view:
 ```bash
 curl -s -H "Authorization: Bearer $REIN_ADMIN_TOKEN" \
   "$REIN_URL/admin/v1/keys" \
-  | jq '.keys[] | {id, name, upstream, daily_budget_usd, month_budget_usd, revoked_at}'
+  | jq '.keys[] | {id, name, upstream, daily_budget_usd, month_budget_usd, rps_limit, rpm_limit, revoked_at}'
 ```
 
 ### Revoke a key
@@ -170,10 +176,36 @@ Response is the revoked key view with `revoked_at` populated:
   "upstream": "openai",
   "daily_budget_usd": 100,
   "month_budget_usd": 2000,
+  "rps_limit": 10,
+  "rpm_limit": 300,
   "created_at": "2026-04-10T12:00:00Z",
   "revoked_at": "2026-04-10T13:30:00Z"
 }
 ```
+
+## Rate limiting
+
+Each virtual key can carry optional `rps_limit` (requests per second) and `rpm_limit`
+(requests per minute) caps. Both default to zero, which means unlimited. When either
+cap is reached, the request returns `429 Too Many Requests` with a `Retry-After` header
+and the upstream is never contacted.
+
+The algorithm is a sliding window counter (the same approach used by Cloudflare, Kong,
+and Envoy). It bounds boundary-burst overshoot to approximately 1.1x the configured
+limit, so `rps_limit: 10` allows at most approximately 11 requests in any rolling
+1-second window.
+
+Rate limit counters are in-memory and reset on process restart.
+
+### Multi-replica note
+
+In a multi-replica Rein deployment, each replica maintains its own rate counters.
+Per-key limits are per-replica, not global. A 3-replica deployment with `rps_limit: 30`
+effectively allows 90 RPS aggregate across all replicas.
+
+Operator formula: `per_replica_limit = desired_global_limit / replica_count`.
+
+A globally-synchronized variant via Redis is tracked in #53.
 
 ## Health and version
 
