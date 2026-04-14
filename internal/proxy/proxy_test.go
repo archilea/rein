@@ -12,6 +12,7 @@ import (
 	"github.com/archilea/rein/internal/keys"
 	"github.com/archilea/rein/internal/killswitch"
 	"github.com/archilea/rein/internal/meter"
+	"github.com/archilea/rein/internal/rates"
 )
 
 // newTestProxy builds a Proxy wired with a fresh in-memory kill-switch,
@@ -22,7 +23,7 @@ func newTestProxy(t *testing.T, store keys.Store, openaiBase, anthropicBase stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), meter.NewPricerHolder(pricer), openaiBase, anthropicBase)
+	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), nil, meter.NewPricerHolder(pricer), openaiBase, anthropicBase)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +191,7 @@ func TestProxy_FrozenReturns503(t *testing.T) {
 		t.Fatal(err)
 	}
 	pricer, _ := meter.LoadPricer()
-	p, err := New(store, ks, meter.NewMemory(), meter.NewPricerHolder(pricer), "https://api.openai.com", "https://api.anthropic.com")
+	p, err := New(store, ks, meter.NewMemory(), nil, meter.NewPricerHolder(pricer), "https://api.openai.com", "https://api.anthropic.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +259,7 @@ func TestProxy_BudgetExceededReturns402(t *testing.T) {
 	// Seed the meter so the key is already at its daily cap.
 	_ = m.Record(context.Background(), vk.ID, 5.00)
 
-	p, err := New(store, killswitch.NewMemory(), m, meter.NewPricerHolder(pricer), "https://api.openai.com", "https://api.anthropic.com")
+	p, err := New(store, killswitch.NewMemory(), m, nil, meter.NewPricerHolder(pricer), "https://api.openai.com", "https://api.anthropic.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +285,7 @@ func TestProxy_SpendIsRecordedAfterUpstream(t *testing.T) {
 	store, vk := newBudgetedKey(t, keys.UpstreamOpenAI, "sk-real", 20.00, 0)
 	pricer, _ := meter.LoadPricer()
 	m := meter.NewMemory()
-	p, err := New(store, killswitch.NewMemory(), m, meter.NewPricerHolder(pricer), upstream.URL, "https://api.anthropic.com")
+	p, err := New(store, killswitch.NewMemory(), m, nil, meter.NewPricerHolder(pricer), upstream.URL, "https://api.anthropic.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +345,7 @@ func TestProxy_OpenAIStreamRecordsSpend(t *testing.T) {
 	store, vk := newBudgetedKey(t, keys.UpstreamOpenAI, "sk-real", 20.00, 0)
 	pricer, _ := meter.LoadPricer()
 	m := meter.NewMemory()
-	p, err := New(store, killswitch.NewMemory(), m, meter.NewPricerHolder(pricer), upstream.URL, "https://api.anthropic.com")
+	p, err := New(store, killswitch.NewMemory(), m, nil, meter.NewPricerHolder(pricer), upstream.URL, "https://api.anthropic.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,5 +392,129 @@ func TestProxy_OpenAIStreamRecordsSpend(t *testing.T) {
 	p.ServeHTTP(rec3, req3)
 	if rec3.Code != http.StatusPaymentRequired {
 		t.Errorf("third stream: got %d want 402 (spend=$25 > $20 cap)", rec3.Code)
+	}
+}
+
+// newRateLimitedKey creates a key with explicit rate limits.
+func newRateLimitedKey(t *testing.T, upstream, upstreamKey string, rpsLimit, rpmLimit int) (*keys.Memory, *keys.VirtualKey) {
+	t.Helper()
+	store := keys.NewMemory()
+	id, _ := keys.GenerateID()
+	token, _ := keys.GenerateToken()
+	vk := &keys.VirtualKey{
+		ID: id, Token: token, Name: "rate-limited",
+		Upstream: upstream, UpstreamKey: upstreamKey,
+		RPSLimit: rpsLimit, RPMLimit: rpmLimit,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := store.Create(context.Background(), vk); err != nil {
+		t.Fatal(err)
+	}
+	return store, vk
+}
+
+func newTestProxyWithRates(t *testing.T, store keys.Store, r rates.Store, openaiBase, anthropicBase string) *Proxy {
+	t.Helper()
+	pricer, err := meter.LoadPricer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), r, meter.NewPricerHolder(pricer), openaiBase, anthropicBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestProxy_RateLimitReturns429(t *testing.T) {
+	upstreamCalled := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4o","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	store, vk := newRateLimitedKey(t, keys.UpstreamOpenAI, "sk-real", 1, 0)
+	rl := rates.NewMemory()
+	p := newTestProxyWithRates(t, store, rl, upstream.URL, "https://api.anthropic.com")
+
+	// First request: should pass.
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4o"}`))
+	req.Header.Set("Authorization", "Bearer "+vk.Token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first request: got %d want 200", rec.Code)
+	}
+
+	// Second request: should 429.
+	upstreamCalled = false
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4o"}`))
+	req2.Header.Set("Authorization", "Bearer "+vk.Token)
+	req2.Header.Set("Content-Type", "application/json")
+	rec2 := httptest.NewRecorder()
+	p.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request: got %d want 429", rec2.Code)
+	}
+	if got := rec2.Header().Get("Retry-After"); got == "" {
+		t.Error("expected Retry-After header on 429")
+	}
+	if upstreamCalled {
+		t.Error("upstream should NOT be contacted on rate-limited request")
+	}
+}
+
+func TestProxy_BudgetCheckBeforeRateLimit(t *testing.T) {
+	store := keys.NewMemory()
+	id, _ := keys.GenerateID()
+	token, _ := keys.GenerateToken()
+	vk := &keys.VirtualKey{
+		ID: id, Token: token, Name: "budgeted-rate-limited",
+		Upstream: keys.UpstreamOpenAI, UpstreamKey: "sk-real",
+		DailyBudgetUSD: 1.0, RPSLimit: 10,
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = store.Create(context.Background(), vk)
+
+	pricer, _ := meter.LoadPricer()
+	m := meter.NewMemory()
+	_ = m.Record(context.Background(), vk.ID, 1.0) // exhaust budget
+	rl := rates.NewMemory()
+	p, _ := New(store, killswitch.NewMemory(), m, rl, meter.NewPricerHolder(pricer), "https://api.openai.com", "https://api.anthropic.com")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer "+vk.Token)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusPaymentRequired {
+		t.Errorf("budget+rate: got %d want 402 (budget should fire first)", rec.Code)
+	}
+}
+
+func TestProxy_NilRatesStoreIsNoop(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4o","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	store, vk := newRateLimitedKey(t, keys.UpstreamOpenAI, "sk-real", 10, 100)
+	p := newTestProxyWithRates(t, store, nil, upstream.URL, "https://api.anthropic.com")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4o"}`))
+	req.Header.Set("Authorization", "Bearer "+vk.Token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("nil rates: got %d want 200", rec.Code)
 	}
 }

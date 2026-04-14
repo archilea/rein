@@ -86,6 +86,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   additive `upstream_base_url` column with a forward-compatible
   migration that runs idempotently against pre-existing databases.
 
+- **Per-key request rate limiting (RPS + RPM)** (#26). Each virtual key
+  can now carry optional `rps_limit` and `rpm_limit` caps enforced on the
+  proxy hot path before the upstream is contacted. Algorithm is a sliding
+  window counter (same as Cloudflare, Kong, Envoy) that bounds
+  boundary-burst overshoot to approximately 1.1x the configured limit.
+  Over-limit requests return `429 Too Many Requests` with a computed
+  `Retry-After` header. New `internal/rates` package exposes a `Store`
+  interface with an in-memory `Memory` implementation; a future
+  Redis-backed implementation (#53) slots in behind the same interface
+  for multi-replica deployments. Counters are in-memory and reset on
+  process restart. Unlimited keys (both limits zero) pay zero cost on
+  the hot path. Admin API accepts `rps_limit` and `rpm_limit` on key
+  create. SQLite schema gains two additive columns via idempotent
+  migration.
+
 ### Changed
 
 - **Public positioning.** Reframed as "a modern, lightweight reverse proxy for LLMs" (previously "a small, boring cost and safety brake for LLM API traffic"). No scope change: the same five "deliberately does not do" constraints still hold.
