@@ -5,7 +5,8 @@
 //  2. Check the kill-switch. If engaged, return 503 immediately.
 //  3. Resolve the inbound "Authorization: Bearer rein_live_..." header via the keystore.
 //  4. Enforce the key's daily/monthly USD caps against the meter, returning 402 on breach.
-//  5. Route to the provider-specific adapter, which swaps in the real upstream key.
+//  5. Enforce per-key request velocity limits (RPS/RPM) against the rate limiter, returning 429 on breach.
+//  6. Route to the provider-specific adapter, which swaps in the real upstream key.
 //
 // After the upstream responds, the provider adapter parses `usage` and records
 // the USD cost with the meter so subsequent Check calls see the new total.
@@ -17,12 +18,14 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/archilea/rein/internal/keys"
 	"github.com/archilea/rein/internal/killswitch"
 	"github.com/archilea/rein/internal/meter"
+	"github.com/archilea/rein/internal/rates"
 )
 
 // upstreamTransport is the shared http.RoundTripper used by every upstream
@@ -60,6 +63,7 @@ type Proxy struct {
 	store      keys.Store
 	killSwitch killswitch.Switch
 	meter      meter.Meter
+	rates      rates.Store
 	openai     http.Handler
 	anthropic  http.Handler
 }
@@ -74,7 +78,7 @@ type Proxy struct {
 //
 // meter and pricer may be nil, in which case per-key budgets and spend
 // recording are disabled. Production wiring always provides both.
-func New(store keys.Store, killSwitch killswitch.Switch, m meter.Meter, pricerHolder *meter.PricerHolder, openaiBase, anthropicBase string) (*Proxy, error) {
+func New(store keys.Store, killSwitch killswitch.Switch, m meter.Meter, r rates.Store, pricerHolder *meter.PricerHolder, openaiBase, anthropicBase string) (*Proxy, error) {
 	oai, err := NewOpenAI(openaiBase, m, pricerHolder)
 	if err != nil {
 		return nil, err
@@ -87,6 +91,7 @@ func New(store keys.Store, killSwitch killswitch.Switch, m meter.Meter, pricerHo
 		store:      store,
 		killSwitch: killSwitch,
 		meter:      m,
+		rates:      r,
 		openai:     oai,
 		anthropic:  ant,
 	}, nil
@@ -177,6 +182,22 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				// Fail open on meter errors. The kill-switch is the independent hard stop.
 				slog.Error("meter check failed, allowing request", "err", err, "key_id", vkey.ID)
+			}
+		}
+		// Rate limit check. Runs after budget (cheaper) and before upstream dispatch.
+		if p.rates != nil && (vkey.RPSLimit > 0 || vkey.RPMLimit > 0) {
+			if err := p.rates.Allow(r.Context(), vkey.ID, vkey.RPSLimit, vkey.RPMLimit); err != nil {
+				if errors.Is(err, rates.ErrRateLimited) {
+					retryAfter := "1"
+					if ra, ok := rates.RetryAfter(err); ok {
+						retryAfter = strconv.Itoa(ra)
+					}
+					w.Header().Set("Retry-After", retryAfter)
+					http.Error(w, "rate limit exceeded for this virtual key", http.StatusTooManyRequests)
+					return
+				}
+				// Fail open on rate limiter errors, same as meter.
+				slog.Error("rate limit check failed, allowing request", "err", err, "key_id", vkey.ID)
 			}
 		}
 		r = r.WithContext(context.WithValue(r.Context(), vkeyContextKey{}, vkey))

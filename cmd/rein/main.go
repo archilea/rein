@@ -23,6 +23,7 @@ import (
 	"github.com/archilea/rein/internal/killswitch"
 	"github.com/archilea/rein/internal/meter"
 	"github.com/archilea/rein/internal/proxy"
+	"github.com/archilea/rein/internal/rates"
 )
 
 // version is set at build time via -ldflags.
@@ -72,7 +73,8 @@ func main() {
 	pricerHolder := meter.NewPricerHolder(initialPricer)
 	spendMeter := meter.NewMemory()
 
-	p, err := proxy.New(keystore, killSwitch, spendMeter, pricerHolder, cfg.OpenAIBase, cfg.AnthropicBase)
+	rateLimiter := rates.NewMemory()
+	p, err := proxy.New(keystore, killSwitch, spendMeter, rateLimiter, pricerHolder, cfg.OpenAIBase, cfg.AnthropicBase)
 	if err != nil {
 		logger.Error("failed to init proxy", "err", err)
 		os.Exit(1)

@@ -10,13 +10,14 @@ Everything else (observability, evals, tracing, prompt caching, routing, fallbac
 
 ## Request pipeline
 
-Every `/v1/*` request goes through the same five steps, in order. The order matters: the kill-switch is first so it can shed load with near-zero work during an incident.
+Every `/v1/*` request goes through the same six steps, in order. The order matters: the kill-switch is first so it can shed load with near-zero work during an incident.
 
 1. **Path dispatch.** The mux routes `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, `/v1/audio/*`, and `/v1/images/*` to the OpenAI adapter, and `/v1/messages` to the Anthropic adapter. Unknown paths return `404`.
 2. **Kill-switch check.** A single `atomic.Bool` read. If engaged, respond `503 Service Unavailable` with `Retry-After: 60` and return. No key lookup, no upstream dial.
 3. **Key resolution.** The inbound `Authorization: Bearer rein_live_...` header is looked up in the keystore. Unknown or revoked tokens return `401`. On SQLite, this is a single indexed `SELECT` plus an AES-256-GCM decrypt of the `upstream_key` column.
 4. **Budget check.** Reads the key's current daily and monthly USD totals from the spend meter and compares them to the key's caps. If either total has already reached the cap, the request returns `402 Payment Required` with a clean body and the upstream is never contacted.
-5. **Forward.** The adapter swaps the inbound rein bearer for the real upstream key (OpenAI uses `Authorization: Bearer`, Anthropic uses `x-api-key`), rewrites the outbound URL to the upstream base, and proxies via `httputil.ReverseProxy` over a tuned shared transport.
+5. **Rate limit check.** If the key has a non-zero `rps_limit` or `rpm_limit`, the in-memory sliding window counter checks both granularities. Returns `429 Too Many Requests` with `Retry-After` if either cap is breached. The upstream is never contacted.
+6. **Forward.** The adapter swaps the inbound rein bearer for the real upstream key (OpenAI uses `Authorization: Bearer`, Anthropic uses `x-api-key`), rewrites the outbound URL to the upstream base, and proxies via `httputil.ReverseProxy` over a tuned shared transport.
 
 On the response path, the adapter parses token usage from the upstream response (streamed or buffered), computes USD cost from the embedded pricing table, and records the amount in the spend meter. The record call runs on a background context so a client disconnect mid-flight cannot race the meter write.
 
@@ -31,6 +32,7 @@ Two properties worth naming explicitly:
 
 1. **Budgets are soft under concurrent bursts.** Check runs before the upstream fetch, Record runs after. `N` concurrent requests can all pass Check at the same total, so the cap can overshoot by up to `N × average_request_cost`. The kill-switch is the independent hard stop. Set caps with a safety margin if you need a true ceiling.
 2. **The 0.1 spend meter is in-process and non-durable.** Totals live in memory and reset on process restart. A durable SQLite-backed meter is the top item on the 0.2 roadmap. Pin a single replica until it lands.
+3. **Rate limits are an orthogonal velocity brake.** Budget caps bound total spend. Rate limits bound request velocity. Both run before the upstream fetch. A key can have both: budget caps prevent runaway cost, rate limits prevent runaway throughput.
 
 ## Streaming
 
@@ -48,6 +50,7 @@ One table. One driver. No CGO.
 - **Keystore.** `virtual_keys` in SQLite via `modernc.org/sqlite` (pure Go). WAL mode is enabled so reads do not block writes. The `upstream_key` column is encrypted at rest with AES-256-GCM using a key supplied via `REIN_ENCRYPTION_KEY`. Rein refuses to start without the key, so plaintext credentials cannot land on disk by accident. Ciphertext carries a `v1:` tag so future algorithm rotations do not require a schema migration.
 - **Kill-switch.** In-process `atomic.Bool`. The kill-switch is global to the process and does not persist across restarts by design: a crash-restart that clears it is the signal to investigate why the process went down.
 - **Spend meter.** In-process maps keyed by `(key_id, day)` and `(key_id, month)` under a mutex. Totals reset on restart. The 0.2 roadmap replaces this with a durable SQLite-backed meter.
+- **Rate limiter.** In-process `sync.Map` of per-key sliding window counters under per-key mutexes. Counters reset on restart, which is fine since in-flight requests cannot outlive the process. A future Redis-backed implementation is tracked in #53.
 
 Supported `REIN_DB_URL` schemes:
 

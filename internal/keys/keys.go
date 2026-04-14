@@ -51,6 +51,8 @@ type VirtualKey struct {
 	// OpenAI-compatible provider (Groq, Together, Fireworks, DeepSeek, xAI,
 	// local vLLM/Ollama, etc.) can ride the existing OpenAI adapter.
 	UpstreamBaseURL string
+	RPSLimit        int // requests per second; 0 means unlimited
+	RPMLimit        int // requests per minute; 0 means unlimited
 	CreatedAt       time.Time
 	RevokedAt       *time.Time
 }

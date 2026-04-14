@@ -45,7 +45,9 @@ curl -X POST http://localhost:8080/admin/v1/keys \
     "upstream": "openai",
     "upstream_key": "sk-...",
     "daily_budget_usd": 50,
-    "month_budget_usd": 1000
+    "month_budget_usd": 1000,
+    "rps_limit": 10,
+    "rpm_limit": 300
   }'
 ```
 
@@ -58,6 +60,8 @@ Response:
   "upstream": "openai",
   "daily_budget_usd": 50,
   "month_budget_usd": 1000,
+  "rps_limit": 10,
+  "rpm_limit": 300,
   "created_at": "2026-04-10T08:12:44Z",
   "token": "rein_live_abc123..."
 }
