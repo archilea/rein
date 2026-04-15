@@ -4,7 +4,7 @@
 
 ### A modern, lightweight reverse proxy for LLMs.
 
-Rein is a small, auditable Go reverse proxy that sits between your apps and the major LLM providers. It swaps virtual keys for real upstream credentials at the edge, meters token spend from streaming and non-streaming responses, enforces hard USD budget caps per key, rate-limits request velocity (RPS and RPM per key), and exposes an instant global kill-switch for incident response. Native adapters ship for OpenAI and Anthropic, with a per-key base URL override for any OpenAI-compatible provider. Single static binary, pure Go, no CGO. No telemetry, ever.
+Rein is a small, auditable Go reverse proxy that sits between your apps and the major LLM providers. It swaps virtual keys for real upstream credentials at the edge, meters token spend from streaming and non-streaming responses, enforces hard USD budget caps per key, rate-limits request velocity (RPS and RPM per key), caps concurrent in-flight requests per key, and exposes an instant global kill-switch for incident response. Native adapters ship for OpenAI and Anthropic, with a per-key base URL override for any OpenAI-compatible provider. Single static binary, pure Go, no CGO. No telemetry, ever.
 
 [![CI](https://github.com/archilea/rein/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/archilea/rein/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
@@ -32,13 +32,15 @@ Cost and safety controls:
 4. **Hard budget caps** per virtual key, daily and monthly USD. Rein checks accumulated spend before every upstream fetch; breach returns `402 Payment Required` and the upstream is never called.
 5. **Instant global kill-switch** via `POST /admin/v1/killswitch`. One HTTP call and every `/v1/*` request returns `503 Service Unavailable` with `Retry-After: 60` until someone unfreezes. A single `atomic.Bool` read on the hot path, effectively free when off, instant when on.
 6. **Per-key rate limiting** with RPS (requests per second) and RPM (requests per minute) caps. A sliding window counter bounds request velocity before the upstream is contacted. Over-limit requests return `429 Too Many Requests` with `Retry-After`.
-7. **Spend metering** from both JSON and SSE streaming responses, priced against an embedded pricing table verified against OpenAI and Anthropic vendor docs. Dated model snapshots (`claude-opus-4-5-20251101`, `gpt-4o-2024-08-06`) resolve to their base entries automatically.
-8. **Streaming usage auto-inject.** For OpenAI chat completions, Rein injects `stream_options.include_usage: true` into the outbound body so streaming clients cannot silently bypass budget enforcement. An explicit client opt-out is respected and logged.
+7. **Per-key concurrency cap** (`max_concurrent`) bounds the number of simultaneously in-flight requests per virtual key. The nginx `limit_conn` analog: rate limit bounds arrival velocity, concurrency cap bounds work-in-progress. Together they bound budget overshoot to `max_concurrent x max_request_cost`. Over-limit requests return `429 Too Many Requests` with `Retry-After: 1`.
+8. **Spend metering** from both JSON and SSE streaming responses, priced against an embedded pricing table verified against OpenAI and Anthropic vendor docs. Dated model snapshots (`claude-opus-4-5-20251101`, `gpt-4o-2024-08-06`) resolve to their base entries automatically.
+9. **Streaming usage auto-inject.** For OpenAI chat completions, Rein injects `stream_options.include_usage: true` into the outbound body so streaming clients cannot silently bypass budget enforcement. An explicit client opt-out is respected and logged.
 
 Operational foundation:
 
-9. **Durable SQLite keystore** via `modernc.org/sqlite` (pure Go, no CGO). WAL mode enabled. Single static binary deploys anywhere.
-10. **Encryption at rest** for the upstream key column using AES-256-GCM. Rein refuses to start without `REIN_ENCRYPTION_KEY`, so plaintext credentials cannot land on disk by accident. Ciphertext carries a `v1:` tag so future algorithm rotations do not require a schema migration.
+10. **Durable SQLite keystore + spend meter** via `modernc.org/sqlite` (pure Go, no CGO). WAL mode enabled. Spend totals survive process restart, OOM, and `kill -9`. Single static binary deploys anywhere.
+11. **Encryption at rest** for the upstream key column using AES-256-GCM. Rein refuses to start without `REIN_ENCRYPTION_KEY`, so plaintext credentials cannot land on disk by accident. Ciphertext carries a `v1:` tag so future algorithm rotations do not require a schema migration.
+12. **Offline encryption key rotation** via the `rein-rotate-keys` CLI. Rotates the AES-256-GCM key that wraps the upstream credential column, idempotent and atomic. Operator runbook in `docs/runbooks/key-rotation.md`.
 
 ## Who this is for
 
@@ -67,8 +69,8 @@ Rein is intentionally small. A security review can cover every line in an aftern
 **Current state**, as of the latest release:
 
 - **1 direct non-stdlib dependency** (`modernc.org/sqlite`)
-- **8 compiled production modules** (measured with `go list -deps ./cmd/rein` on Linux, excluding stdlib and test-only deps)
-- **~12 MB compressed amd64 image**
+- **10 compiled production modules** (measured with `go list -deps ./cmd/rein` on Linux, excluding stdlib and test-only deps)
+- **~14.5 MB compressed amd64 image**
 
 If those numbers change materially in a future release, the `CHANGELOG.md` entry for that release will say why. The specific CI thresholds live in `.github/workflows/ci.yml` as grep-able literals so the history of every budget change is visible in `git log` on that file.
 
@@ -252,14 +254,15 @@ flowchart LR
     Rein -- "response stream" --> Client
 ```
 
-Inside Rein, every `/v1/*` request passes through six checks in order:
+Inside Rein, every `/v1/*` request passes through seven checks in order:
 
 1. **Kill-switch check.** A single `atomic.Bool` read. If frozen, returns `503 Service Unavailable` with `Retry-After: 60`. No key lookup, no upstream dial.
 2. **Key lookup.** Resolves the inbound `Authorization: Bearer rein_live_...` against the SQLite keystore, with AES-256-GCM decrypt of the `upstream_key` column. Returns `401` if missing, invalid, or revoked.
-3. **Budget check.** Reads the key's daily and monthly USD totals from the in-memory spend meter. Returns `402 Payment Required` if either cap is reached. The upstream is never contacted.
+3. **Budget check.** Reads the key's daily and monthly USD totals from the spend meter. Returns `402 Payment Required` if either cap is reached. The upstream is never contacted.
 4. **Rate limit check.** If the key has `rps_limit` or `rpm_limit` set, checks the in-memory sliding window counter. Returns `429 Too Many Requests` with `Retry-After` if either cap is breached. The upstream is never contacted.
-5. **Forward.** The adapter swaps the rein bearer for the real upstream key (`Authorization: Bearer` for OpenAI, `x-api-key` for Anthropic) and proxies through a tuned `httputil.ReverseProxy`.
-6. **Meter record on the response path.** The adapter parses token usage from the upstream response (streaming or buffered), computes USD cost from the embedded pricing table, and records the amount. The next request's Check sees the updated total.
+5. **Concurrency cap check.** If the key has `max_concurrent` set, an atomic per-key counter is incremented; if the new value exceeds the cap, it is decremented and the request returns `429 Too Many Requests` with `Retry-After: 1`. A deferred Release frees the slot after the adapter returns, covering happy path, upstream error, client disconnect, and panic unwind alike. Unlimited keys (`max_concurrent: 0`) short-circuit before any state lookup and pay zero cost.
+6. **Forward.** The adapter swaps the rein bearer for the real upstream key (`Authorization: Bearer` for OpenAI, `x-api-key` for Anthropic) and proxies through a tuned `httputil.ReverseProxy`.
+7. **Meter record on the response path.** The adapter parses token usage from the upstream response (streaming or buffered), computes USD cost from the embedded pricing table, and records the amount. The next request's Check sees the updated total.
 
 The kill-switch sits first so it can shed load with a single atomic read during an incident. Metering runs on the response path, so the check-then-record ordering is what creates the "soft cap under concurrent bursts" caveat documented in the Budgets section.
 
@@ -273,11 +276,16 @@ Rein is a thin layer. The only honest question is whether it is honest about bei
 
 | Path | Time per req | Req/s | Allocs | What it measures |
 |---|---|---|---|---|
-| Normal hot path (SQLite + budget) | **33.6 µs** | **~29,800** | 300 | Full production config |
-| MemStore + budget (no SQLite) | 29.0 µs | ~34,500 | 239 | SQLite adds ~5 µs |
-| Kill-switch engaged (SQLite) | **11.5 µs** | **~86,700** | 96 | Fast-path rejection |
+| Normal hot path (SQLite + budget) | **34.0 µs** | **~29,400** | 308 | Full production config |
+| MemStore + budget (no SQLite) | 29.6 µs | ~33,800 | 243 | SQLite adds ~5 µs |
+| Kill-switch engaged (SQLite) | **11.6 µs** | **~86,600** | 96 | Fast-path rejection |
+| Per-key base URL override (#24) | 35.3 µs | ~28,300 | 310 | One sync.Map load on the cached URL |
+| Rate-limited path (#26) | 34.8 µs | ~28,800 | 314 | Sliding window check + counter increment |
+| Concurrency cap, unlimited (#27) | 34.7 µs | ~28,800 | 308 | `max_concurrent: 0` short-circuit |
+| Concurrency cap, limited (#27) | 34.1 µs | ~29,300 | 310 | One atomic Add + deferred Release |
+| Multi-key concurrency, 100 keys (#27) | 34.4 µs | ~29,000 | 308 | Cache-line padding prevents false sharing |
 
-Budget enforcement adds **zero measurable overhead** versus the same path without budgets. The in-memory spend meter's locks are uncontended at these rates; the cost is four extra allocations per request.
+Every 0.2 brake (rate limit, concurrency cap, base URL override) adds **zero measurable overhead** versus the unbraked baseline. Budget enforcement, rate limiting, and concurrency capping each cost a handful of nanoseconds amortized across the request; the bottleneck is everywhere except Rein.
 
 ### Why this does not matter in production
 
@@ -356,6 +364,7 @@ Kept deliberately short. Features that would break the size ceiling are not here
 - [x] `0.2` Operator-editable pricing overrides with SIGHUP + poll-based hot reload
 - [x] `0.2` CI-enforced audit-friendly ceilings (direct dep count, compiled dep count, compressed image size)
 - [x] `0.2` Per-key request rate limiting (RPS + RPM, sliding window counter)
+- [x] `0.2` Per-key max concurrent in-flight requests (`max_concurrent`, nginx `limit_conn` analog)
 - [x] `0.2` Durable SQLite-backed meter (spend survives restart)
 - [x] `0.2` Encryption key rotation tool (`rein-rotate-keys`, offline)
 - [ ] `0.3` Slack / Discord / webhook alerts at budget thresholds

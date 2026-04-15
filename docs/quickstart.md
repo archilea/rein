@@ -47,7 +47,8 @@ curl -X POST http://localhost:8080/admin/v1/keys \
     "daily_budget_usd": 50,
     "month_budget_usd": 1000,
     "rps_limit": 10,
-    "rpm_limit": 300
+    "rpm_limit": 300,
+    "max_concurrent": 20
   }'
 ```
 
@@ -62,6 +63,7 @@ Response:
   "month_budget_usd": 1000,
   "rps_limit": 10,
   "rpm_limit": 300,
+  "max_concurrent": 20,
   "created_at": "2026-04-10T08:12:44Z",
   "token": "rein_live_abc123..."
 }
@@ -70,6 +72,11 @@ Response:
 The `token` is returned exactly once. Rein never shows it again. Subsequent
 `GET /admin/v1/keys` responses omit both the rein token and the upstream key.
 Copy it straight into your secret manager.
+
+`rps_limit` and `rpm_limit` bound arrival velocity; `max_concurrent` bounds
+work-in-progress. Both default to zero (unlimited). For the full list of
+optional fields and the multi-replica caveat for both brakes, see
+[admin-api.md](admin-api.md).
 
 ## 3. Point your app at Rein
 

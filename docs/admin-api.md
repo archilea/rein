@@ -22,7 +22,7 @@ The token is compared in constant time on the server to defeat timing
 side-channels. There is no login endpoint and no session: every request
 carries the token, every response is stateless.
 
-There are no read-only scopes in 0.1. Anyone with the admin token can flip the
+There are no read-only scopes today. Anyone with the admin token can flip the
 kill-switch, mint keys, and revoke keys. Treat it like any other root secret.
 
 ## Kill-switch
@@ -303,7 +303,7 @@ curl -X POST \
 - **Script these, do not memorize them.** This file is meant to live next to
   your runbooks. Fork it, adapt it, keep a copy checked into your ops repo.
 - **The admin token is all-or-nothing.** Read-only scopes and per-user tokens
-  are not in 0.1. If you need those, gate the admin port with your own
+  are not implemented. If you need those, gate the admin port with your own
   identity-aware proxy.
 - **No pagination on list yet.** `GET /admin/v1/keys` returns every row. This
   is fine at alpha scale and tracked as a future enhancement.
