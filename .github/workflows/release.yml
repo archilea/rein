@@ -197,11 +197,13 @@ jobs:
           for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
             goos="${target%/*}"
             goarch="${target#*/}"
-            out="dist/rein-${REIN_VERSION}-${goos}-${goarch}"
-            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
-              -trimpath \
-              -ldflags="-s -w -X main.version=${REIN_VERSION}" \
-              -o "$out" ./cmd/rein
+            for bin in rein rein-rotate-keys; do
+              out="dist/${bin}-${REIN_VERSION}-${goos}-${goarch}"
+              CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
+                -trimpath \
+                -ldflags="-s -w -X main.version=${REIN_VERSION}" \
+                -o "$out" "./cmd/${bin}"
+            done
           done
 
       - name: Install cyclonedx-gomod

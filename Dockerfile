@@ -21,7 +21,11 @@ ARG REIN_VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux go build \
       -trimpath \
       -ldflags="-s -w -X main.version=${REIN_VERSION}" \
-      -o /out/rein ./cmd/rein
+      -o /out/rein ./cmd/rein && \
+    CGO_ENABLED=0 GOOS=linux go build \
+      -trimpath \
+      -ldflags="-s -w -X main.version=${REIN_VERSION}" \
+      -o /out/rein-rotate-keys ./cmd/rein-rotate-keys
 
 # --- runtime stage ---
 FROM alpine:3.22 AS runtime
@@ -34,6 +38,7 @@ RUN apk add --no-cache ca-certificates tini && \
 
 WORKDIR /app
 COPY --from=build /out/rein /usr/local/bin/rein
+COPY --from=build /out/rein-rotate-keys /usr/local/bin/rein-rotate-keys
 
 USER rein
 
