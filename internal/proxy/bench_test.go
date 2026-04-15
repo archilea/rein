@@ -271,6 +271,63 @@ func BenchmarkRein_Frozen(b *testing.B) {
 	})
 }
 
+// benchSetupWithMeter is benchSetup with an injectable meter.Meter, so a
+// benchmark can measure the full hot path with the durable SQLite meter
+// instead of meter.Memory.
+func benchSetupWithMeter(b *testing.B, useSQLite, withBudget bool, upstream *httptest.Server, m meter.Meter) (string, string) {
+	b.Helper()
+	store := buildStore(b, useSQLite)
+	id, _ := keys.GenerateID()
+	token, _ := keys.GenerateToken()
+	vk := &keys.VirtualKey{
+		ID: id, Token: token, Name: "bench-durable",
+		Upstream: keys.UpstreamOpenAI, UpstreamKey: "sk-fake",
+		CreatedAt: time.Now().UTC(),
+	}
+	if withBudget {
+		vk.DailyBudgetUSD = 1_000_000
+		vk.MonthBudgetUSD = 1_000_000
+	}
+	if err := store.Create(context.Background(), vk); err != nil {
+		b.Fatal(err)
+	}
+	pricer, err := meter.LoadPricer()
+	if err != nil {
+		b.Fatal(err)
+	}
+	p, err := New(store, killswitch.NewMemory(), m, nil, meter.NewPricerHolder(pricer), upstream.URL, "https://api.anthropic.com")
+	if err != nil {
+		b.Fatal(err)
+	}
+	rein := httptest.NewServer(p)
+	b.Cleanup(rein.Close)
+	return rein.URL, token
+}
+
+// Full production hot path with the durable SQLite meter: SQLite keystore +
+// AES-256-GCM decrypt + SQLite-backed Check + transactional Record per
+// request.
+//
+// Baseline measured on Apple M5 (macOS 15, APFS, -cpu=4): ~72 us/op total,
+// versus ~34 us/op for the in-memory meter. The ~38 us/op incremental cost
+// comes from two SQLite round trips per request (Check SELECT + Record
+// transaction with WAL append) plus SetMaxOpenConns(1)
+// serialization at the Go pool. On Linux NVMe with cheaper fdatasync,
+// expect the incremental cost to fall closer to the 15-30 us/op range.
+func BenchmarkRein_SQLite_WithDurableMeter_ZeroLatency(b *testing.B) {
+	up := mockUpstream()
+	b.Cleanup(up.Close)
+
+	m, err := meter.NewSQLite(filepath.Join(b.TempDir(), "meter.db"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = m.Close() })
+
+	url, tok := benchSetupWithMeter(b, true, true, up, m)
+	drive200(b, url, tok)
+}
+
 // benchSetupWithRates variant mints a key with rate limits set.
 func benchSetupWithRates(b *testing.B, useSQLite bool, upstream *httptest.Server, rpsLimit, rpmLimit int) (string, string) {
 	b.Helper()

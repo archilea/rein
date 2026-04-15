@@ -101,6 +101,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   create. SQLite schema gains two additive columns via idempotent
   migration.
 
+- **Durable SQLite-backed spend meter** (#17). Per-key daily and monthly
+  USD totals now persist to the same SQLite file as the keystore so they
+  survive a process restart, OOM, or `kill -9`. Schema is one row per
+  `(key_id, period)` under `WITHOUT ROWID`; Check is one `SELECT ... WHERE
+  period IN (?, ?)`, Record is a single transaction with two UPSERTs so a
+  crash between the day and month writes cannot leave them out of sync.
+  Wiring follows the keystore rule: `REIN_DB_URL=sqlite:<path>` picks up
+  the durable meter (default), `REIN_DB_URL=memory` keeps the in-process
+  ephemeral meter used in 0.1. On a 4-core Apple M5 the full production
+  hot path measures about 72 microseconds per request with the durable
+  meter enabled, versus about 34 microseconds with the in-memory meter.
+  Durability is scoped to application-crash survival: committed Records survive process crashes, OOM, and kill -9 (WAL replays on reopen). Power-loss durability uses the SQLite WAL default (synchronous=NORMAL); operators who need stronger guarantees can tighten it later.
+
 ### Changed
 
 - **Public positioning.** Reframed as "a modern, lightweight reverse proxy for LLMs" (previously "a small, boring cost and safety brake for LLM API traffic"). No scope change: the same five "deliberately does not do" constraints still hold.
@@ -108,7 +121,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Planned for 0.2
 
-- Durable SQLite-backed spend meter so budget totals survive process restart.
 - Encryption key rotation tool (`rein-rotate-keys`).
 
 ## [0.1.1] - 2026-04-10

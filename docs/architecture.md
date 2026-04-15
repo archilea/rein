@@ -31,7 +31,7 @@ Each virtual key carries an optional `daily_budget_usd` and `month_budget_usd` c
 Two properties worth naming explicitly:
 
 1. **Budgets are soft under concurrent bursts.** Check runs before the upstream fetch, Record runs after. `N` concurrent requests can all pass Check at the same total, so the cap can overshoot by up to `N × average_request_cost`. The kill-switch is the independent hard stop. Set caps with a safety margin if you need a true ceiling.
-2. **The 0.1 spend meter is in-process and non-durable.** Totals live in memory and reset on process restart. A durable SQLite-backed meter is the top item on the 0.2 roadmap. Pin a single replica until it lands.
+2. **Totals are durable.** Each Record persists to the SQLite spend table inside a single transaction, so a restart or crash cannot lose already-recorded spend. With `REIN_DB_URL=memory` (the ephemeral path for tests), totals reset on restart.
 3. **Rate limits are an orthogonal velocity brake.** Budget caps bound total spend. Rate limits bound request velocity. Both run before the upstream fetch. A key can have both: budget caps prevent runaway cost, rate limits prevent runaway throughput.
 
 ## Streaming
@@ -49,7 +49,7 @@ One table. One driver. No CGO.
 
 - **Keystore.** `virtual_keys` in SQLite via `modernc.org/sqlite` (pure Go). WAL mode is enabled so reads do not block writes. The `upstream_key` column is encrypted at rest with AES-256-GCM using a key supplied via `REIN_ENCRYPTION_KEY`. Rein refuses to start without the key, so plaintext credentials cannot land on disk by accident. Ciphertext carries a `v1:` tag so future algorithm rotations do not require a schema migration.
 - **Kill-switch.** In-process `atomic.Bool`. The kill-switch is global to the process and does not persist across restarts by design: a crash-restart that clears it is the signal to investigate why the process went down.
-- **Spend meter.** In-process maps keyed by `(key_id, day)` and `(key_id, month)` under a mutex. Totals reset on restart. The 0.2 roadmap replaces this with a durable SQLite-backed meter.
+- **Spend meter.** Durable SQLite table `spend(key_id, period, amount) WITHOUT ROWID` on the same file as the keystore. Check is one `SELECT period, amount FROM spend WHERE key_id = ? AND period IN (?, ?)` returning at most two rows (day + month bucket). Record is a single transaction with two UPSERTs so a crash between the day and month writes cannot leave them out of sync. Totals survive process restart, OOM, and `kill -9`. WAL mode with the SQLite default `synchronous=NORMAL` keeps every committed Record durable across process crashes; a power-loss window of seconds is possible if the OS panics before flushing the WAL to disk. `SetMaxOpenConns(1)` serializes writes at the Go pool level because `modernc.org/sqlite` does not honor `busy_timeout` for intra-process write-lock contention. With `REIN_DB_URL=memory` the in-process `meter.Memory` is used instead; totals reset on restart.
 - **Rate limiter.** In-process `sync.Map` of per-key sliding window counters under per-key mutexes. Counters reset on restart, which is fine since in-flight requests cannot outlive the process. A future Redis-backed implementation is tracked in #53.
 
 Supported `REIN_DB_URL` schemes:

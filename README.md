@@ -201,7 +201,7 @@ Two things to know, because honesty is the whole point of this project:
 
 1. **Budgets are soft in one narrow sense.** Check runs before the upstream fetch, Record runs after. A burst of N concurrent requests can all pass Check at the same total, so the cap can overshoot by up to `N × average_request_cost`. The kill-switch is the independent hard stop. For real production guarantees, set `daily_budget_usd` with a safety margin below the bill you actually want to cap at.
 
-2. **0.1 uses an in-process meter that resets on restart.** Spend totals live in memory. If the Rein process crashes and restarts, counters reset to zero. This is fine for single-replica deployments where a crash means a deliberate restart, and disastrous for loops that would otherwise climb indefinitely. A SQLite-backed durable meter is the top item on the 0.2 roadmap. Set a conservative cap and pin a single replica until it lands.
+2. **Totals are durable.** The spend meter is durable when `REIN_DB_URL=sqlite:<path>` (the default). Totals survive a process restart, OOM, or `kill -9`. Each Record is a single SQLite transaction against the same file as the keystore, so a crash between the daily and monthly updates cannot leave them out of sync. Set `REIN_DB_URL=memory` for ephemeral runs (tests or throw-away deployments), where totals reset on restart. Multi-replica deployments are still out of scope for 0.2: per-replica SQLite files do not coordinate, so pin a single replica if you care about global totals.
 
 Budgets use the embedded pricing table under `internal/meter/pricing.json`, which was verified against vendor docs on the date shown in the `fetched_at` field. Verify against your own account's pricing before turning on caps in production. Unknown or newly released models are logged and skipped (they do not count toward spend) so a new model release never breaks the proxy. Operators who want to **override a vendor price** (out-of-date embedded value, or a custom rate from their account) or **add pricing for a provider-specific model** (Groq's `llama-3.3-70b-versatile`, Fireworks models, DeepSeek, etc.) can drop a `rein.json` at `/etc/rein/rein.json` — or point at any path via `REIN_CONFIG_FILE` — and reload with `SIGHUP`. See [docs/quickstart.md § 3b](docs/quickstart.md) for the full file format, hybrid resolution rules, and Kubernetes ConfigMap guidance.
 
@@ -267,7 +267,7 @@ For deeper detail see [docs/architecture.md](docs/architecture.md).
 
 ## Performance
 
-Rein is a thin layer. The only honest question is whether it is honest about being thin. Short answer: **Rein's full production hot path adds about 34 microseconds per request on a 4-core Apple M5**, measured with the production SQLite keystore, AES-256-GCM decrypt on every virtual-key lookup, and budget enforcement enabled.
+Rein is a thin layer. The only honest question is whether it is honest about being thin. Short answer: **Rein's full production hot path adds about 34 microseconds per request on a 4-core Apple M5**, measured with the production SQLite keystore, AES-256-GCM decrypt on every virtual-key lookup, and budget enforcement enabled. With the durable SQLite meter enabled (`REIN_DB_URL=sqlite:<path>`, the default), the same hot path measures about 72 microseconds per request on a 4-core Apple M5 (macOS 15, APFS). The ~38 microsecond increment is two SQLite round trips (Check SELECT + Record transaction with WAL append + fdatasync) plus pool serialization; on Linux NVMe with cheaper fdatasync, expect the increment closer to 15 to 25 microseconds. The durable meter prioritizes application-crash durability (process crash, OOM, kill -9) via WAL. Power-loss durability for the last few seconds of writes is bounded by the SQLite WAL default (synchronous=NORMAL), which single-replica operators can strengthen later if their threat model warrants it.
 
 ### Measured numbers (Apple M5, Go 1.26, 4 parallel workers)
 
@@ -299,7 +299,7 @@ On a 4-core VM, a single Rein instance can sustain thousands of concurrent in-fl
 - **These numbers are from a laptop.** Bigger servers with more cores should scale roughly linearly, but we have not benchmarked at scale yet.
 - **The mock upstream is in-process.** `httptest.NewServer` uses a real loopback listener but adds near-zero latency. Real TCP and TLS add a few hundred microseconds per new connection, amortized to near-zero with keep-alive.
 - **Streaming is not in the table.** SSE throughput depends on chunk size, not Rein's code path. The tee reader adds one copy per `Read`, which is well under 1 ms for typical chat completions.
-- **The 0.1 spend meter is in-process.** The 0.2 durable SQLite meter will add a second query per request and push the SQLite-path overhead from 5 µs to something in the 15-30 µs range. Still negligible next to LLM latency.
+- **The benchmark table above reflects the in-memory meter path.** With the durable SQLite meter enabled (`REIN_DB_URL=sqlite:<path>`, the default), the same hot path measures about 72 microseconds per request on a 4-core Apple M5 (macOS 15, APFS). The ~38 microsecond increment is two SQLite round trips (Check SELECT + Record transaction with WAL append + fdatasync) plus pool serialization; on Linux NVMe with cheaper fdatasync, expect the increment closer to 15 to 25 microseconds. The durable meter prioritizes application-crash durability (process crash, OOM, kill -9) via WAL. Power-loss durability for the last few seconds of writes is bounded by the SQLite WAL default (synchronous=NORMAL), which single-replica operators can strengthen later if their threat model warrants it.
 
 ### Reproducing
 
@@ -356,7 +356,7 @@ Kept deliberately short. Features that would break the size ceiling are not here
 - [x] `0.2` Operator-editable pricing overrides with SIGHUP + poll-based hot reload
 - [x] `0.2` CI-enforced audit-friendly ceilings (direct dep count, compiled dep count, compressed image size)
 - [x] `0.2` Per-key request rate limiting (RPS + RPM, sliding window counter)
-- [ ] `0.2` Durable SQLite-backed meter (spend survives restart)
+- [x] `0.2` Durable SQLite-backed meter (spend survives restart)
 - [ ] `0.2` Encryption key rotation tool
 - [ ] `0.3` Slack / Discord / webhook alerts at budget thresholds
 

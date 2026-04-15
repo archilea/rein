@@ -74,9 +74,21 @@ func (m *Memory) Record(_ context.Context, keyID string, cost float64) error {
 	return nil
 }
 
-// periodKeys produces the per-day and per-month bucket keys for a virtual key.
+// dayPeriodKey returns the UTC-anchored daily bucket id for t,
+// formatted "d:YYYY-MM-DD".
+func dayPeriodKey(t time.Time) string {
+	return "d:" + t.UTC().Format("2006-01-02")
+}
+
+// monthPeriodKey returns the UTC-anchored monthly bucket id for t,
+// formatted "m:YYYY-MM".
+func monthPeriodKey(t time.Time) string {
+	return "m:" + t.UTC().Format("2006-01")
+}
+
+// periodKeys produces the per-day and per-month map keys for keyID.
 // Boundaries are always UTC to keep multi-region deployments consistent.
 func periodKeys(keyID string, now time.Time) (string, string) {
-	return keyID + "|d:" + now.UTC().Format("2006-01-02"),
-		keyID + "|m:" + now.UTC().Format("2006-01")
+	return keyID + "|" + dayPeriodKey(now),
+		keyID + "|" + monthPeriodKey(now)
 }

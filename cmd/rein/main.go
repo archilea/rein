@@ -71,7 +71,13 @@ func main() {
 		os.Exit(1)
 	}
 	pricerHolder := meter.NewPricerHolder(initialPricer)
-	spendMeter := meter.NewMemory()
+
+	spendMeter, err := openSpendMeter(cfg.DatabaseURL)
+	if err != nil {
+		logger.Error("failed to open spend meter", "err", err, "url", cfg.DatabaseURL)
+		os.Exit(1)
+	}
+	logger.Info("spend meter ready", "url", cfg.DatabaseURL)
 
 	rateLimiter := rates.NewMemory()
 	p, err := proxy.New(keystore, killSwitch, spendMeter, rateLimiter, pricerHolder, cfg.OpenAIBase, cfg.AnthropicBase)
@@ -132,6 +138,15 @@ func main() {
 		logger.Error("graceful shutdown failed", "err", err)
 		os.Exit(1)
 	}
+
+	// Release the spend meter's DB handle, if any. The Meter interface does
+	// not require Close, but the durable SQLite implementation does; without
+	// this, the WAL sidecar files linger until the OS reclaims them.
+	if closer, ok := spendMeter.(interface{ Close() error }); ok {
+		if err := closer.Close(); err != nil {
+			logger.Error("close spend meter failed", "err", err)
+		}
+	}
 }
 
 // startReloadHandlers wires SIGHUP and (optionally) a background poller
@@ -183,6 +198,26 @@ func startReloadHandlers(
 			holder,
 		)
 	}
+}
+
+// openSpendMeter builds a meter.Meter from the configured DB URL. The
+// selection rule mirrors openKeystore:
+//   - sqlite:<path>   meter.NewSQLite against the same file as the keystore;
+//     totals are durable across restart.
+//   - memory (or "")  meter.NewMemory; totals reset on restart.
+//
+// Any other scheme is a startup error so typos like "sqlite//..." do not
+// silently downgrade to the in-memory meter.
+func openSpendMeter(dbURL string) (meter.Meter, error) {
+	trimmed := strings.TrimSpace(dbURL)
+	if trimmed == "" || trimmed == "memory" || trimmed == "memory:" {
+		return meter.NewMemory(), nil
+	}
+	path, ok := strings.CutPrefix(trimmed, "sqlite:")
+	if !ok {
+		return nil, fmt.Errorf("unsupported REIN_DB_URL scheme %q for meter (want sqlite:<path> or memory)", dbURL)
+	}
+	return meter.NewSQLite(path)
 }
 
 func handleHealthz(w http.ResponseWriter, _ *http.Request) {

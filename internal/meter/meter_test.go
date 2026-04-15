@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestMemory_CheckWithNoCapsPasses(t *testing.T) {
@@ -71,5 +72,33 @@ func TestMemory_ConcurrentRecord(t *testing.T) {
 	// After 200 records of $1, $200 cap should be exactly at the boundary.
 	if err := m.Check(ctx, "key_c", 200.00, 0); !errors.Is(err, ErrBudgetExceeded) {
 		t.Errorf("expected cap breach after 200 concurrent records, got %v", err)
+	}
+}
+
+func TestPeriodKeyHelpers(t *testing.T) {
+	// 2026-04-15 11:30 UTC
+	ts := time.Date(2026, 4, 15, 11, 30, 0, 0, time.UTC)
+	if got, want := dayPeriodKey(ts), "d:2026-04-15"; got != want {
+		t.Errorf("dayPeriodKey(%v) = %q, want %q", ts, got, want)
+	}
+	if got, want := monthPeriodKey(ts), "m:2026-04"; got != want {
+		t.Errorf("monthPeriodKey(%v) = %q, want %q", ts, got, want)
+	}
+	// periodKeys composition stays consistent with the old format.
+	d, m := periodKeys("key_x", ts)
+	if d != "key_x|d:2026-04-15" || m != "key_x|m:2026-04" {
+		t.Errorf("periodKeys regression: %q / %q", d, m)
+	}
+
+	// Non-UTC input must be normalized. 2026-04-16 00:30 in a
+	// fixed +05:00 zone is 2026-04-15 19:30 UTC; the helpers must
+	// bucket it into 2026-04-15 / 2026-04.
+	plusFive := time.FixedZone("UTC+5", 5*60*60)
+	tsLocal := time.Date(2026, 4, 16, 0, 30, 0, 0, plusFive)
+	if got, want := dayPeriodKey(tsLocal), "d:2026-04-15"; got != want {
+		t.Errorf("dayPeriodKey(local) = %q, want %q (must normalize to UTC)", got, want)
+	}
+	if got, want := monthPeriodKey(tsLocal), "m:2026-04"; got != want {
+		t.Errorf("monthPeriodKey(local) = %q, want %q (must normalize to UTC)", got, want)
 	}
 }
