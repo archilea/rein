@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-key concurrency cap** (#27). Virtual keys gain an optional
+  `max_concurrent` field that caps the number of simultaneously in-flight
+  `/v1/*` requests for that key. When the cap is reached, the next
+  request receives `429 Too Many Requests` with `Retry-After: 1` and the
+  upstream is never contacted. This is the nginx `limit_conn` analog and
+  pairs cleanly with the existing rate limit (`rps_limit`/`rpm_limit`)
+  brake: the rate limit bounds arrival velocity, the concurrency cap
+  bounds work-in-progress. The cap is the recommended way to bound the
+  soft-budget overshoot documented in the README: with
+  `max_concurrent: K`, worst-case overshoot is bounded by
+  `K × max_request_cost` regardless of arrival pattern. The hot-path
+  implementation is a lock-free per-key atomic counter behind a
+  `concurrency.Store` interface; counters are cache-line-padded to
+  prevent false sharing across keys, and unlimited keys
+  (`max_concurrent: 0`) pay zero cost. In multi-replica deployments,
+  per-key limits are per-replica; a globally-synchronized variant slots
+  in behind the same interface in a future release. See
+  `docs/admin-api.md` for operator guidance.
+
 - **Encryption key rotation tool** (#18). A new offline CLI
   `rein-rotate-keys` rotates the AES-256-GCM key that encrypts
   `upstream_key` in the SQLite keystore. It is a separate binary (not

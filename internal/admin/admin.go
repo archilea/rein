@@ -126,6 +126,7 @@ type keyView struct {
 	MonthBudgetUSD  float64    `json:"month_budget_usd"`
 	RPSLimit        int        `json:"rps_limit"`
 	RPMLimit        int        `json:"rpm_limit"`
+	MaxConcurrent   int        `json:"max_concurrent"`
 	UpstreamBaseURL string     `json:"upstream_base_url,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
 	RevokedAt       *time.Time `json:"revoked_at,omitempty"`
@@ -140,6 +141,7 @@ func viewOf(k *keys.VirtualKey) keyView {
 		MonthBudgetUSD:  k.MonthBudgetUSD,
 		RPSLimit:        k.RPSLimit,
 		RPMLimit:        k.RPMLimit,
+		MaxConcurrent:   k.MaxConcurrent,
 		UpstreamBaseURL: k.UpstreamBaseURL,
 		CreatedAt:       k.CreatedAt,
 		RevokedAt:       k.RevokedAt,
@@ -162,6 +164,7 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		MonthBudgetUSD  float64 `json:"month_budget_usd"`
 		RPSLimit        int     `json:"rps_limit"`
 		RPMLimit        int     `json:"rpm_limit"`
+		MaxConcurrent   int     `json:"max_concurrent"`
 		UpstreamBaseURL string  `json:"upstream_base_url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -192,6 +195,10 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.RPSLimit < 0 || body.RPMLimit < 0 {
 		http.Error(w, "rate limits must be non-negative", http.StatusBadRequest)
+		return
+	}
+	if body.MaxConcurrent < 0 {
+		http.Error(w, "max_concurrent must be non-negative", http.StatusBadRequest)
 		return
 	}
 	// Per-key upstream base URL override. Only meaningful for the OpenAI
@@ -241,6 +248,7 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		MonthBudgetUSD:  body.MonthBudgetUSD,
 		RPSLimit:        body.RPSLimit,
 		RPMLimit:        body.RPMLimit,
+		MaxConcurrent:   body.MaxConcurrent,
 		UpstreamBaseURL: canonicalBaseURL,
 		CreatedAt:       time.Now().UTC(),
 	}

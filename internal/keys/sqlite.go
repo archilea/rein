@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS virtual_keys (
 	upstream_base_url  TEXT NOT NULL DEFAULT '',
 	rps_limit          INTEGER NOT NULL DEFAULT 0,
 	rpm_limit          INTEGER NOT NULL DEFAULT 0,
+	max_concurrent     INTEGER NOT NULL DEFAULT 0,
 	created_at         TEXT NOT NULL,
 	revoked_at         TEXT
 );`
@@ -92,6 +93,7 @@ func applySQLiteMigrations(db *sql.DB) error {
 	}{
 		{"rps_limit", `ALTER TABLE virtual_keys ADD COLUMN rps_limit INTEGER NOT NULL DEFAULT 0`},
 		{"rpm_limit", `ALTER TABLE virtual_keys ADD COLUMN rpm_limit INTEGER NOT NULL DEFAULT 0`},
+		{"max_concurrent", `ALTER TABLE virtual_keys ADD COLUMN max_concurrent INTEGER NOT NULL DEFAULT 0`},
 	} {
 		has, err := sqliteColumnExists(db, "virtual_keys", col.name)
 		if err != nil {
@@ -179,11 +181,11 @@ func (s *SQLite) Create(ctx context.Context, k *VirtualKey) error {
 		return fmt.Errorf("encrypt upstream key: %w", err)
 	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO virtual_keys (id, token, name, upstream, upstream_key, daily_budget_usd, month_budget_usd, upstream_base_url, rps_limit, rpm_limit, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO virtual_keys (id, token, name, upstream, upstream_key, daily_budget_usd, month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		k.ID, k.Token, k.Name, k.Upstream, encUpstream,
 		k.DailyBudgetUSD, k.MonthBudgetUSD, k.UpstreamBaseURL,
-		k.RPSLimit, k.RPMLimit,
+		k.RPSLimit, k.RPMLimit, k.MaxConcurrent,
 		k.CreatedAt.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("insert virtual key: %w", err)
@@ -209,11 +211,11 @@ func (s *SQLite) queryOne(ctx context.Context, column, value string) (*VirtualKe
 	switch column {
 	case "id":
 		q = `SELECT id, token, name, upstream, upstream_key, daily_budget_usd,
-			month_budget_usd, upstream_base_url, rps_limit, rpm_limit, created_at, revoked_at
+			month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent, created_at, revoked_at
 			FROM virtual_keys WHERE id = ?`
 	case "token":
 		q = `SELECT id, token, name, upstream, upstream_key, daily_budget_usd,
-			month_budget_usd, upstream_base_url, rps_limit, rpm_limit, created_at, revoked_at
+			month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent, created_at, revoked_at
 			FROM virtual_keys WHERE token = ?`
 	default:
 		return nil, fmt.Errorf("queryOne: unsupported lookup column %q", column)
@@ -226,7 +228,7 @@ func (s *SQLite) queryOne(ctx context.Context, column, value string) (*VirtualKe
 func (s *SQLite) List(ctx context.Context) ([]*VirtualKey, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, token, name, upstream, upstream_key, daily_budget_usd,
-		       month_budget_usd, upstream_base_url, rps_limit, rpm_limit, created_at, revoked_at
+		       month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent, created_at, revoked_at
 		FROM virtual_keys ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("query keys: %w", err)
@@ -279,7 +281,7 @@ func (s *SQLite) scanKey(scan func(dest ...any) error) (*VirtualKey, error) {
 	)
 	err := scan(&k.ID, &k.Token, &k.Name, &k.Upstream, &encUpstream,
 		&k.DailyBudgetUSD, &k.MonthBudgetUSD, &k.UpstreamBaseURL,
-		&k.RPSLimit, &k.RPMLimit,
+		&k.RPSLimit, &k.RPMLimit, &k.MaxConcurrent,
 		&createdAt, &revokedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
