@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Encryption key rotation tool** (#18). A new offline CLI
+  `rein-rotate-keys` rotates the AES-256-GCM key that encrypts
+  `upstream_key` in the SQLite keystore. It is a separate binary (not
+  a `rein` subcommand) because a running `rein` process holds exactly
+  one `REIN_ENCRYPTION_KEY` at a time, so rotation is inherently
+  offline. Usage:
+
+  ```
+  rein-rotate-keys --db sqlite:./rein.db \
+    --old-key $OLD_HEX --new-key $NEW_HEX
+  ```
+
+  Safety properties: the tool walks every `virtual_keys` row,
+  decrypting with the old cipher and re-encrypting with the new
+  cipher inside a single write transaction. Rows already encrypted
+  under the new cipher are detected and skipped, so a second run with
+  the same `--new-key` is a no-op (idempotent). Any row that decrypts
+  under neither cipher aborts the whole run BEFORE any write, so a
+  partial rotation cannot leave the DB in a half-migrated state.
+  After applying updates the tool re-reads one rotated row and
+  verifies it decrypts under the new cipher before committing. No
+  plaintext or key material appears in logs or error messages; the
+  binary prints only `rotated=N skipped=M duration=...`. The operator
+  runbook with the full stop, backup, rotate, restart flow lives at
+  `docs/runbooks/key-rotation.md`. See #18.
+
 - **Operator-editable pricing overrides with hot reload** (#25). A new
   `rein.json` config file resolved via the hybrid rule — env var
   `REIN_CONFIG_FILE` wins if set, otherwise `/etc/rein/rein.json`

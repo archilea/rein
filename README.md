@@ -357,7 +357,7 @@ Kept deliberately short. Features that would break the size ceiling are not here
 - [x] `0.2` CI-enforced audit-friendly ceilings (direct dep count, compiled dep count, compressed image size)
 - [x] `0.2` Per-key request rate limiting (RPS + RPM, sliding window counter)
 - [x] `0.2` Durable SQLite-backed meter (spend survives restart)
-- [ ] `0.2` Encryption key rotation tool
+- [x] `0.2` Encryption key rotation tool (`rein-rotate-keys`, offline)
 - [ ] `0.3` Slack / Discord / webhook alerts at budget thresholds
 
 ## Contributing
