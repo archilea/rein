@@ -133,6 +133,7 @@ func TestPricingOverride_BudgetCapFiresOnBreach(t *testing.T) {
 		killswitch.NewMemory(),
 		spendMeter,
 		nil,
+		nil,
 		holder,
 		// Deliberately-unreachable default upstream. If the override is
 		// ever silently ignored, the test fails loudly with a dial
@@ -261,7 +262,7 @@ func TestPricingOverride_MergedEntryResolvesAtRequestTime(t *testing.T) {
 	// Use a dedicated meter instance so we can inspect whether the
 	// merged pricer's override entry resolved (non-zero recorded spend).
 	spendMeter := meter.NewMemory()
-	p, err := New(store, killswitch.NewMemory(), spendMeter, nil, holder,
+	p, err := New(store, killswitch.NewMemory(), spendMeter, nil, nil, holder,
 		"http://127.0.0.1:1", "https://api.anthropic.com")
 	if err != nil {
 		t.Fatal(err)

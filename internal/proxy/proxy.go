@@ -6,7 +6,8 @@
 //  3. Resolve the inbound "Authorization: Bearer rein_live_..." header via the keystore.
 //  4. Enforce the key's daily/monthly USD caps against the meter, returning 402 on breach.
 //  5. Enforce per-key request velocity limits (RPS/RPM) against the rate limiter, returning 429 on breach.
-//  6. Route to the provider-specific adapter, which swaps in the real upstream key.
+//  6. Enforce per-key concurrency caps against the concurrency store, returning 429 on breach.
+//  7. Route to the provider-specific adapter, which swaps in the real upstream key.
 //
 // After the upstream responds, the provider adapter parses `usage` and records
 // the USD cost with the meter so subsequent Check calls see the new total.
@@ -22,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/archilea/rein/internal/concurrency"
 	"github.com/archilea/rein/internal/keys"
 	"github.com/archilea/rein/internal/killswitch"
 	"github.com/archilea/rein/internal/meter"
@@ -60,12 +62,13 @@ func upstreamTransport() *http.Transport {
 // validates virtual keys, enforces per-key budgets, routes to the correct
 // provider adapter, and injects the real upstream key.
 type Proxy struct {
-	store      keys.Store
-	killSwitch killswitch.Switch
-	meter      meter.Meter
-	rates      rates.Store
-	openai     http.Handler
-	anthropic  http.Handler
+	store       keys.Store
+	killSwitch  killswitch.Switch
+	meter       meter.Meter
+	rates       rates.Store
+	concurrency concurrency.Store
+	openai      http.Handler
+	anthropic   http.Handler
 }
 
 // New constructs a Proxy with handlers for each supported upstream.
@@ -78,7 +81,10 @@ type Proxy struct {
 //
 // meter and pricer may be nil, in which case per-key budgets and spend
 // recording are disabled. Production wiring always provides both.
-func New(store keys.Store, killSwitch killswitch.Switch, m meter.Meter, r rates.Store, pricerHolder *meter.PricerHolder, openaiBase, anthropicBase string) (*Proxy, error) {
+//
+// c may be nil, in which case per-key concurrency caps are disabled.
+// Production wiring always provides a concurrency.Memory.
+func New(store keys.Store, killSwitch killswitch.Switch, m meter.Meter, r rates.Store, c concurrency.Store, pricerHolder *meter.PricerHolder, openaiBase, anthropicBase string) (*Proxy, error) {
 	oai, err := NewOpenAI(openaiBase, m, pricerHolder)
 	if err != nil {
 		return nil, err
@@ -88,12 +94,13 @@ func New(store keys.Store, killSwitch killswitch.Switch, m meter.Meter, r rates.
 		return nil, err
 	}
 	return &Proxy{
-		store:      store,
-		killSwitch: killSwitch,
-		meter:      m,
-		rates:      r,
-		openai:     oai,
-		anthropic:  ant,
+		store:       store,
+		killSwitch:  killSwitch,
+		meter:       m,
+		rates:       r,
+		concurrency: c,
+		openai:      oai,
+		anthropic:   ant,
 	}, nil
 }
 
@@ -199,6 +206,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// Fail open on rate limiter errors, same as meter.
 				slog.Error("rate limit check failed, allowing request", "err", err, "key_id", vkey.ID)
 			}
+		}
+		// Concurrency cap. Runs after rate limit (rejection there is cheaper)
+		// and before upstream dispatch. defer Release fires on every exit
+		// mode: happy path, upstream error, client disconnect mid-stream,
+		// context cancel, and adapter panic (Go's defer runs during unwinding
+		// before the net/http recovery handler). Zero cost when MaxConcurrent
+		// is unlimited: Acquire returns true without touching the sync.Map.
+		if p.concurrency != nil && vkey.MaxConcurrent > 0 {
+			if !p.concurrency.Acquire(vkey.ID, vkey.MaxConcurrent) {
+				w.Header().Set("Retry-After", "1")
+				http.Error(w, "concurrency limit exceeded for this virtual key", http.StatusTooManyRequests)
+				return
+			}
+			defer p.concurrency.Release(vkey.ID, vkey.MaxConcurrent)
 		}
 		r = r.WithContext(context.WithValue(r.Context(), vkeyContextKey{}, vkey))
 	}

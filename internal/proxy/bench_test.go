@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/archilea/rein/internal/concurrency"
 	"github.com/archilea/rein/internal/keys"
 	"github.com/archilea/rein/internal/killswitch"
 	"github.com/archilea/rein/internal/meter"
@@ -108,7 +109,7 @@ func benchSetupOverride(b *testing.B, useSQLite, withBudget bool, upstream *http
 	if err != nil {
 		b.Fatal(err)
 	}
-	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), nil, meter.NewPricerHolder(pricer), proxyOpenAIBase, "https://api.anthropic.com")
+	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), nil, nil, meter.NewPricerHolder(pricer), proxyOpenAIBase, "https://api.anthropic.com")
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -238,7 +239,7 @@ func BenchmarkRein_Frozen(b *testing.B) {
 	_ = ks.SetFrozen(context.Background(), true)
 
 	pricer, _ := meter.LoadPricer()
-	p, _ := New(store, ks, meter.NewMemory(), nil, meter.NewPricerHolder(pricer), up.URL, "https://api.anthropic.com")
+	p, _ := New(store, ks, meter.NewMemory(), nil, nil, meter.NewPricerHolder(pricer), up.URL, "https://api.anthropic.com")
 	rein := httptest.NewServer(p)
 	b.Cleanup(rein.Close)
 
@@ -295,7 +296,7 @@ func benchSetupWithMeter(b *testing.B, useSQLite, withBudget bool, upstream *htt
 	if err != nil {
 		b.Fatal(err)
 	}
-	p, err := New(store, killswitch.NewMemory(), m, nil, meter.NewPricerHolder(pricer), upstream.URL, "https://api.anthropic.com")
+	p, err := New(store, killswitch.NewMemory(), m, nil, nil, meter.NewPricerHolder(pricer), upstream.URL, "https://api.anthropic.com")
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -349,7 +350,7 @@ func benchSetupWithRates(b *testing.B, useSQLite bool, upstream *httptest.Server
 		b.Fatal(err)
 	}
 	rl := rates.NewMemory()
-	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), rl, meter.NewPricerHolder(pricer), upstream.URL, "https://api.anthropic.com")
+	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), rl, nil, meter.NewPricerHolder(pricer), upstream.URL, "https://api.anthropic.com")
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -372,4 +373,137 @@ func BenchmarkRein_MemStore_WithBudget_RateLimited_ZeroLatency(b *testing.B) {
 	b.Cleanup(up.Close)
 	url, tok := benchSetupWithRates(b, false, up, 1_000_000, 60_000_000)
 	drive200(b, url, tok)
+}
+
+// benchSetupWithConcurrency mints a key with MaxConcurrent set, wires the
+// proxy with a concurrency.Memory store, and returns the test rein URL +
+// token. driveParallel is the caller's goroutine count for -cpu sweeps.
+func benchSetupWithConcurrency(b *testing.B, useSQLite bool, upstream *httptest.Server, maxConcurrent int) (string, string) {
+	b.Helper()
+	store := buildStore(b, useSQLite)
+	id, _ := keys.GenerateID()
+	token, _ := keys.GenerateToken()
+	vk := &keys.VirtualKey{
+		ID: id, Token: token, Name: "bench-cc",
+		Upstream: keys.UpstreamOpenAI, UpstreamKey: "sk-fake",
+		DailyBudgetUSD: 1_000_000, MonthBudgetUSD: 1_000_000,
+		MaxConcurrent: maxConcurrent,
+		CreatedAt:     time.Now().UTC(),
+	}
+	if err := store.Create(context.Background(), vk); err != nil {
+		b.Fatal(err)
+	}
+	pricer, err := meter.LoadPricer()
+	if err != nil {
+		b.Fatal(err)
+	}
+	cs := concurrency.NewMemory()
+	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), nil, cs, meter.NewPricerHolder(pricer), upstream.URL, "https://api.anthropic.com")
+	if err != nil {
+		b.Fatal(err)
+	}
+	rein := httptest.NewServer(p)
+	b.Cleanup(rein.Close)
+	return rein.URL, token
+}
+
+// BenchmarkRein_SQLite_WithBudget_ConcurrencyUnlimited_ZeroLatency: a key
+// with MaxConcurrent=0 must pay zero hot-path cost compared to
+// BenchmarkRein_SQLite_WithBudget_ZeroLatency. The concurrency.Memory
+// store's Acquire short-circuits on limit==0 without touching the
+// sync.Map.
+func BenchmarkRein_SQLite_WithBudget_ConcurrencyUnlimited_ZeroLatency(b *testing.B) {
+	up := mockUpstream()
+	b.Cleanup(up.Close)
+	url, tok := benchSetupWithConcurrency(b, true, up, 0)
+	drive200(b, url, tok)
+}
+
+// BenchmarkRein_SQLite_WithBudget_ConcurrencyLimited_ZeroLatency: a key
+// with a high concurrency cap (no rejection) measures the per-request
+// overhead of one sync.Map lookup, one atomic Add(1), and the deferred
+// Release. The acceptance bar is under 1 µs of additional overhead vs
+// BenchmarkRein_SQLite_WithBudget_ZeroLatency.
+func BenchmarkRein_SQLite_WithBudget_ConcurrencyLimited_ZeroLatency(b *testing.B) {
+	up := mockUpstream()
+	b.Cleanup(up.Close)
+	url, tok := benchSetupWithConcurrency(b, true, up, 1_000_000)
+	drive200(b, url, tok)
+}
+
+// BenchmarkRein_ConcurrencyMultiKeyParallel hammers 100 distinct keys
+// concurrently, each with its own MaxConcurrent cap. This is the
+// false-sharing test: without paddedCounter, the per-request overhead
+// degrades 2-5x as -cpu rises because per-key counters share a cache
+// line. With padding, the line should stay roughly flat across
+// -cpu=1,2,4,8,16 sweeps.
+//
+// Run with:
+//
+//	go test ./internal/proxy -bench BenchmarkRein_ConcurrencyMultiKeyParallel \
+//	       -benchtime=3s -cpu=1,2,4,8,16
+func BenchmarkRein_ConcurrencyMultiKeyParallel(b *testing.B) {
+	up := mockUpstream()
+	b.Cleanup(up.Close)
+
+	store := buildStore(b, true)
+	const numKeys = 100
+	tokens := make([]string, numKeys)
+	for i := 0; i < numKeys; i++ {
+		id, _ := keys.GenerateID()
+		token, _ := keys.GenerateToken()
+		vk := &keys.VirtualKey{
+			ID: id, Token: token, Name: "bench-multi",
+			Upstream: keys.UpstreamOpenAI, UpstreamKey: "sk-fake",
+			DailyBudgetUSD: 1_000_000, MonthBudgetUSD: 1_000_000,
+			MaxConcurrent: 50,
+			CreatedAt:     time.Now().UTC(),
+		}
+		if err := store.Create(context.Background(), vk); err != nil {
+			b.Fatal(err)
+		}
+		tokens[i] = token
+	}
+	pricer, err := meter.LoadPricer()
+	if err != nil {
+		b.Fatal(err)
+	}
+	cs := concurrency.NewMemory()
+	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), nil, cs, meter.NewPricerHolder(pricer), up.URL, "https://api.anthropic.com")
+	if err != nil {
+		b.Fatal(err)
+	}
+	rein := httptest.NewServer(p)
+	b.Cleanup(rein.Close)
+
+	payload := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"b"}]}`)
+	client := &http.Client{
+		Transport: &http.Transport{
+			MaxIdleConns:        500,
+			MaxIdleConnsPerHost: 500,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			tok := tokens[i%numKeys]
+			i++
+			req, _ := http.NewRequest("POST", rein.URL+"/v1/chat/completions", bytes.NewReader(payload))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+tok)
+			resp, err := client.Do(req)
+			if err != nil {
+				b.Fatal(err)
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != 200 {
+				b.Fatalf("status %d", resp.StatusCode)
+			}
+		}
+	})
 }
