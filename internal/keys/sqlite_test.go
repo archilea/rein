@@ -635,6 +635,163 @@ func TestSQLite_RateLimitMigrationFromPreExistingSchema(t *testing.T) {
 	}
 }
 
+// TestSQLite_MaxConcurrentRoundtrip verifies that MaxConcurrent persists
+// through SQLite write and read for both unlimited and explicit caps.
+func TestSQLite_MaxConcurrentRoundtrip(t *testing.T) {
+	s := newTestSQLite(t)
+
+	id1, _ := GenerateID()
+	token1, _ := GenerateToken()
+	vk1 := &VirtualKey{
+		ID:            id1,
+		Token:         token1,
+		Name:          "capped",
+		Upstream:      UpstreamOpenAI,
+		UpstreamKey:   "sk-real",
+		MaxConcurrent: 25,
+		CreatedAt:     time.Now().UTC(),
+	}
+	if err := s.Create(context.Background(), vk1); err != nil {
+		t.Fatalf("create capped: %v", err)
+	}
+	got1, err := s.GetByToken(context.Background(), token1)
+	if err != nil {
+		t.Fatalf("get capped: %v", err)
+	}
+	if got1.MaxConcurrent != 25 {
+		t.Errorf("MaxConcurrent roundtrip: got %d want 25", got1.MaxConcurrent)
+	}
+
+	id2, _ := GenerateID()
+	token2, _ := GenerateToken()
+	vk2 := &VirtualKey{
+		ID:          id2,
+		Token:       token2,
+		Name:        "uncapped",
+		Upstream:    UpstreamOpenAI,
+		UpstreamKey: "sk-real",
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := s.Create(context.Background(), vk2); err != nil {
+		t.Fatalf("create uncapped: %v", err)
+	}
+	got2, err := s.GetByToken(context.Background(), token2)
+	if err != nil {
+		t.Fatalf("get uncapped: %v", err)
+	}
+	if got2.MaxConcurrent != 0 {
+		t.Errorf("uncapped MaxConcurrent: got %d want 0", got2.MaxConcurrent)
+	}
+
+	list, err := s.List(context.Background())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	byID := map[string]*VirtualKey{}
+	for _, k := range list {
+		byID[k.ID] = k
+	}
+	if byID[id1].MaxConcurrent != 25 {
+		t.Errorf("list: capped MaxConcurrent=%d want 25", byID[id1].MaxConcurrent)
+	}
+	if byID[id2].MaxConcurrent != 0 {
+		t.Errorf("list: uncapped MaxConcurrent=%d want 0", byID[id2].MaxConcurrent)
+	}
+}
+
+// TestSQLite_MaxConcurrentMigrationFromPreExistingSchema exercises the
+// ADD COLUMN branch for a DB that existed before the max_concurrent
+// column was introduced.
+func TestSQLite_MaxConcurrentMigrationFromPreExistingSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pre-max-concurrent.db")
+
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)",
+		url.PathEscape(path))
+	raw, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	const preMaxConcurrentSchema = `
+		CREATE TABLE virtual_keys (
+			id                 TEXT PRIMARY KEY,
+			token              TEXT NOT NULL UNIQUE,
+			name               TEXT NOT NULL,
+			upstream           TEXT NOT NULL,
+			upstream_key       TEXT NOT NULL,
+			daily_budget_usd   REAL NOT NULL DEFAULT 0,
+			month_budget_usd   REAL NOT NULL DEFAULT 0,
+			upstream_base_url  TEXT NOT NULL DEFAULT '',
+			rps_limit          INTEGER NOT NULL DEFAULT 0,
+			rpm_limit          INTEGER NOT NULL DEFAULT 0,
+			created_at         TEXT NOT NULL,
+			revoked_at         TEXT
+		);`
+	if _, err := raw.Exec(preMaxConcurrentSchema); err != nil {
+		t.Fatalf("create pre-max-concurrent schema: %v", err)
+	}
+	if _, err := raw.Exec(`INSERT INTO virtual_keys
+		(id, token, name, upstream, upstream_key,
+		 daily_budget_usd, month_budget_usd, upstream_base_url,
+		 rps_limit, rpm_limit, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"key_0000000000000003", "rein_live_legacy_mc", "legacy-mc",
+		UpstreamOpenAI, "legacy-ciphertext-placeholder",
+		0.0, 0.0, "", 0, 0, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw handle: %v", err)
+	}
+
+	s, err := NewSQLite(path, mustAESGCM(t))
+	if err != nil {
+		t.Fatalf("open pre-max-concurrent db via NewSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	has, err := sqliteColumnExists(s.db, "virtual_keys", "max_concurrent")
+	if err != nil {
+		t.Fatalf("column exists check: %v", err)
+	}
+	if !has {
+		t.Fatal("migration did not add max_concurrent column")
+	}
+
+	var legacyMC int
+	if err := s.db.QueryRow(
+		`SELECT max_concurrent FROM virtual_keys WHERE id = ?`,
+		"key_0000000000000003",
+	).Scan(&legacyMC); err != nil {
+		t.Fatalf("select legacy row: %v", err)
+	}
+	if legacyMC != 0 {
+		t.Errorf("legacy row max_concurrent: got %d want 0", legacyMC)
+	}
+
+	// New key on migrated DB must persist a non-zero cap.
+	id, _ := GenerateID()
+	token, _ := GenerateToken()
+	vk := &VirtualKey{
+		ID:            id,
+		Token:         token,
+		Name:          "post-migration-mc",
+		Upstream:      UpstreamOpenAI,
+		UpstreamKey:   "sk-post",
+		MaxConcurrent: 7,
+		CreatedAt:     time.Now().UTC(),
+	}
+	if err := s.Create(context.Background(), vk); err != nil {
+		t.Fatalf("create post-migration key: %v", err)
+	}
+	got, err := s.GetByToken(context.Background(), vk.Token)
+	if err != nil {
+		t.Fatalf("get post-migration key: %v", err)
+	}
+	if got.MaxConcurrent != 7 {
+		t.Errorf("post-migration roundtrip: got %d want 7", got.MaxConcurrent)
+	}
+}
+
 func TestSQLite_ColumnExistsGuard(t *testing.T) {
 	s := newTestSQLite(t)
 	has, err := sqliteColumnExists(s.db, "virtual_keys", "upstream_base_url")

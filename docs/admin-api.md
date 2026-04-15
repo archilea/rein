@@ -94,7 +94,8 @@ curl -X POST "$REIN_URL/admin/v1/keys" \
     "daily_budget_usd": 100,
     "month_budget_usd": 2000,
     "rps_limit": 10,
-    "rpm_limit": 300
+    "rpm_limit": 300,
+    "max_concurrent": 50
   }'
 ```
 
@@ -110,6 +111,7 @@ Response:
   "month_budget_usd": 2000,
   "rps_limit": 10,
   "rpm_limit": 300,
+  "max_concurrent": 50,
   "created_at": "2026-04-10T12:00:00Z"
 }
 ```
@@ -141,6 +143,7 @@ Response:
       "month_budget_usd": 2000,
       "rps_limit": 10,
       "rpm_limit": 300,
+      "max_concurrent": 50,
       "created_at": "2026-04-10T12:00:00Z"
     }
   ]
@@ -152,7 +155,7 @@ Pipe through `jq` for a readable operator view:
 ```bash
 curl -s -H "Authorization: Bearer $REIN_ADMIN_TOKEN" \
   "$REIN_URL/admin/v1/keys" \
-  | jq '.keys[] | {id, name, upstream, daily_budget_usd, month_budget_usd, rps_limit, rpm_limit, revoked_at}'
+  | jq '.keys[] | {id, name, upstream, daily_budget_usd, month_budget_usd, rps_limit, rpm_limit, max_concurrent, revoked_at}'
 ```
 
 ### Revoke a key
@@ -178,6 +181,7 @@ Response is the revoked key view with `revoked_at` populated:
   "month_budget_usd": 2000,
   "rps_limit": 10,
   "rpm_limit": 300,
+  "max_concurrent": 50,
   "created_at": "2026-04-10T12:00:00Z",
   "revoked_at": "2026-04-10T13:30:00Z"
 }
@@ -206,6 +210,42 @@ effectively allows 90 RPS aggregate across all replicas.
 Operator formula: `per_replica_limit = desired_global_limit / replica_count`.
 
 A globally-synchronized variant via Redis is tracked in #53.
+
+## Concurrency limiting
+
+Each virtual key can carry an optional `max_concurrent` cap on the number of
+in-flight `/v1/*` requests. The default is zero, which means unlimited. When the
+cap is reached, the next request returns `429 Too Many Requests` with
+`Retry-After: 1` and the upstream is never contacted. Slots free as in-flight
+requests complete (success, upstream error, client disconnect, or context
+cancel are all treated identically).
+
+This is the nginx `limit_conn` analog. It is orthogonal to the rate limit:
+rate limits bound arrival velocity (requests per second/minute), the
+concurrency cap bounds work-in-progress (requests held at any instant). The
+two compose: a key with `rps_limit: 10, max_concurrent: 5` allows 10 starts
+per second but never more than 5 simultaneously.
+
+The concurrency cap is the recommended brake to bound the soft-cap budget
+overshoot documented in the README. With `max_concurrent: K` and a
+worst-case per-request cost of `C`, the budget overshoot is bounded by
+`K × C` regardless of arrival pattern.
+
+Counters are in-memory and reset on process restart. In-flight requests
+cannot outlive the process, so restart resets are safe.
+
+### Multi-replica note
+
+In a multi-replica Rein deployment, each replica maintains its own
+concurrency counters. Per-key limits are per-replica, not global. A 3-replica
+deployment with `max_concurrent: 30` effectively allows 90 simultaneous
+in-flight requests aggregate across all replicas.
+
+Operator formula: `per_replica_limit = desired_global_limit / replica_count`.
+
+A globally-synchronized variant (a distributed semaphore via Redis, or
+similar) is out of scope for 0.2 but slots in behind the same `Store`
+interface without rewriting the hot path.
 
 ## Health and version
 

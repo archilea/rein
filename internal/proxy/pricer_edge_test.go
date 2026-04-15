@@ -51,7 +51,7 @@ func TestOpenAI_SwapNilPricerIsSafe(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), nil, holder,
+	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), nil, nil, holder,
 		upstream.URL, "https://api.anthropic.com")
 	if err != nil {
 		t.Fatal(err)

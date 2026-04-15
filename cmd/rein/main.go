@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/archilea/rein/internal/admin"
+	"github.com/archilea/rein/internal/concurrency"
 	"github.com/archilea/rein/internal/config"
 	"github.com/archilea/rein/internal/keys"
 	"github.com/archilea/rein/internal/killswitch"
@@ -80,7 +81,8 @@ func main() {
 	logger.Info("spend meter ready", "url", cfg.DatabaseURL)
 
 	rateLimiter := rates.NewMemory()
-	p, err := proxy.New(keystore, killSwitch, spendMeter, rateLimiter, pricerHolder, cfg.OpenAIBase, cfg.AnthropicBase)
+	concurrencyStore := concurrency.NewMemory()
+	p, err := proxy.New(keystore, killSwitch, spendMeter, rateLimiter, concurrencyStore, pricerHolder, cfg.OpenAIBase, cfg.AnthropicBase)
 	if err != nil {
 		logger.Error("failed to init proxy", "err", err)
 		os.Exit(1)

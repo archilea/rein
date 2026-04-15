@@ -199,7 +199,7 @@ curl -X POST http://localhost:8080/admin/v1/keys \
 
 Two things to know, because honesty is the whole point of this project:
 
-1. **Budgets are soft in one narrow sense.** Check runs before the upstream fetch, Record runs after. A burst of N concurrent requests can all pass Check at the same total, so the cap can overshoot by up to `N × average_request_cost`. The kill-switch is the independent hard stop. For real production guarantees, set `daily_budget_usd` with a safety margin below the bill you actually want to cap at.
+1. **Budgets are soft in one narrow sense.** Check runs before the upstream fetch, Record runs after. A burst of N concurrent requests can all pass Check at the same total, so the cap can overshoot by up to `N × average_request_cost`. To bound that overshoot, set `max_concurrent` on the key: per-key concurrency caps act as the work-in-progress brake (nginx `limit_conn` analog), so worst-case overshoot is bounded by `max_concurrent × max_request_cost`. The kill-switch remains the independent hard stop. For real production guarantees, set `daily_budget_usd` with a safety margin below the bill you actually want to cap at.
 
 2. **Totals are durable.** The spend meter is durable when `REIN_DB_URL=sqlite:<path>` (the default). Totals survive a process restart, OOM, or `kill -9`. Each Record is a single SQLite transaction against the same file as the keystore, so a crash between the daily and monthly updates cannot leave them out of sync. Set `REIN_DB_URL=memory` for ephemeral runs (tests or throw-away deployments), where totals reset on restart. Multi-replica deployments are still out of scope for 0.2: per-replica SQLite files do not coordinate, so pin a single replica if you care about global totals.
 

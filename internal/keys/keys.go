@@ -53,6 +53,7 @@ type VirtualKey struct {
 	UpstreamBaseURL string
 	RPSLimit        int // requests per second; 0 means unlimited
 	RPMLimit        int // requests per minute; 0 means unlimited
+	MaxConcurrent   int // max concurrent in-flight requests; 0 means unlimited
 	CreatedAt       time.Time
 	RevokedAt       *time.Time
 }

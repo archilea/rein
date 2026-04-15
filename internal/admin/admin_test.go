@@ -476,3 +476,136 @@ func TestAdmin_CreateKey_RateLimitsInResponse(t *testing.T) {
 		t.Errorf("rpm_limit: got %d want 300", resp.RPMLimit)
 	}
 }
+
+func TestAdmin_CreateKey_NegativeMaxConcurrentRejected(t *testing.T) {
+	_, _, _, mux := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/v1/keys",
+		strings.NewReader(`{"name":"bad","upstream":"openai","upstream_key":"sk-x","max_concurrent":-1}`))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("negative max_concurrent: got %d want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdmin_CreateKey_MaxConcurrentInResponse(t *testing.T) {
+	_, _, _, mux := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/v1/keys",
+		strings.NewReader(`{"name":"mc-key","upstream":"openai","upstream_key":"sk-x","max_concurrent":10}`))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: got %d want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		MaxConcurrent int `json:"max_concurrent"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.MaxConcurrent != 10 {
+		t.Errorf("max_concurrent: got %d want 10", resp.MaxConcurrent)
+	}
+}
+
+func TestAdmin_CreateKey_MaxConcurrentOmittedDefaultsToZero(t *testing.T) {
+	_, _, _, mux := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/v1/keys",
+		strings.NewReader(`{"name":"default","upstream":"openai","upstream_key":"sk-x"}`))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: got %d want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		MaxConcurrent int `json:"max_concurrent"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.MaxConcurrent != 0 {
+		t.Errorf("omitted max_concurrent: got %d want 0 (unlimited)", resp.MaxConcurrent)
+	}
+}
+
+func TestAdmin_ListAndRevokeIncludeMaxConcurrent(t *testing.T) {
+	_, _, _, mux := newTestServer(t)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/admin/v1/keys",
+		strings.NewReader(`{"name":"mc-list","upstream":"openai","upstream_key":"sk-x","max_concurrent":7}`))
+	createReq.Header.Set("Authorization", "Bearer "+testToken)
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	mux.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create: got %d want 201; body=%s", createRec.Code, createRec.Body.String())
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/admin/v1/keys", nil)
+	listReq.Header.Set("Authorization", "Bearer "+testToken)
+	listRec := httptest.NewRecorder()
+	mux.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list: got %d want 200; body=%s", listRec.Code, listRec.Body.String())
+	}
+	var list struct {
+		Keys []struct {
+			ID            string `json:"id"`
+			MaxConcurrent int    `json:"max_concurrent"`
+		} `json:"keys"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	var listed *struct {
+		ID            string `json:"id"`
+		MaxConcurrent int    `json:"max_concurrent"`
+	}
+	for i := range list.Keys {
+		if list.Keys[i].ID == created.ID {
+			listed = &list.Keys[i]
+			break
+		}
+	}
+	if listed == nil {
+		t.Fatalf("created key %q missing from list response", created.ID)
+	}
+	if listed.MaxConcurrent != 7 {
+		t.Errorf("list: max_concurrent=%d want 7", listed.MaxConcurrent)
+	}
+
+	revokeReq := httptest.NewRequest(http.MethodPost, "/admin/v1/keys/"+created.ID+"/revoke", nil)
+	revokeReq.Header.Set("Authorization", "Bearer "+testToken)
+	revokeRec := httptest.NewRecorder()
+	mux.ServeHTTP(revokeRec, revokeReq)
+	if revokeRec.Code != http.StatusOK {
+		t.Fatalf("revoke: got %d want 200; body=%s", revokeRec.Code, revokeRec.Body.String())
+	}
+	var revoked struct {
+		MaxConcurrent int `json:"max_concurrent"`
+	}
+	if err := json.Unmarshal(revokeRec.Body.Bytes(), &revoked); err != nil {
+		t.Fatalf("decode revoke: %v", err)
+	}
+	if revoked.MaxConcurrent != 7 {
+		t.Errorf("revoke: max_concurrent=%d want 7", revoked.MaxConcurrent)
+	}
+}
