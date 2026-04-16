@@ -25,7 +25,7 @@ Reverse proxy:
 
 1. **Reverse proxy** for OpenAI (`/v1/chat/*`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, `/v1/audio/*`, `/v1/images/*`) and Anthropic (`/v1/messages`). Streaming-aware with pure passthrough. Per-key upstream base URL override unlocks any OpenAI-compatible provider without additional adapter code.
 2. **Virtual keys** (`rein_live_*`) that wrap your real upstream credentials. Clients never see the upstream key. Rotating a compromised credential is one admin API call; old rein tokens keep working until you revoke them.
-3. **Admin API** for virtual key create, list, revoke, and kill-switch, all protected by a single bearer token compared in constant time.
+3. **Admin API** for virtual key create, list, update, revoke, and kill-switch, all protected by a single bearer token compared in constant time.
 
 Cost and safety controls:
 
@@ -368,7 +368,12 @@ Kept deliberately short. Features that would break the size ceiling are not here
 - [x] `0.2` Per-key max concurrent in-flight requests (`max_concurrent`, nginx `limit_conn` analog)
 - [x] `0.2` Durable SQLite-backed meter (spend survives restart)
 - [x] `0.2` Encryption key rotation tool (`rein-rotate-keys`, offline)
-- [ ] `0.3` Slack / Discord / webhook alerts at budget thresholds
+- [x] `0.3` Structured JSON errors on all proxy endpoints (#75)
+- [x] `0.3` `PATCH /admin/v1/keys/{id}`: update a key's caps without re-minting (#74)
+- [ ] `0.3` Per-key `expires_at` with automatic revocation (#77)
+- [ ] `0.3` Per-key model allowlist (#28)
+- [ ] `0.3` Per-key upstream request timeout (#30)
+- [ ] `0.3` Graceful shutdown: drain flag, configurable grace, proxy-side 503, `/readyz` (#76)
 
 ## Contributing
 

@@ -159,6 +159,57 @@ curl -s -H "Authorization: Bearer $REIN_ADMIN_TOKEN" \
   | jq '.keys[] | {id, name, upstream, daily_budget_usd, month_budget_usd, rps_limit, rpm_limit, max_concurrent, revoked_at}'
 ```
 
+### Update a key's caps
+
+`PATCH /admin/v1/keys/{id}` lets you change a virtual key's mutable fields
+without revoking and re-minting it. Only the fields present in the JSON body
+are changed; absent fields are preserved. Zero values explicitly set the cap
+to unlimited (same semantics as create).
+
+Mutable fields: `name`, `daily_budget_usd`, `month_budget_usd`, `rps_limit`,
+`rpm_limit`, `max_concurrent`, `upstream_base_url`.
+
+Immutable fields (`id`, `token`, `upstream`, `upstream_key`, `created_at`,
+`revoked_at`) cannot be changed and are rejected with `400` if included.
+Revoked keys return `409 Conflict`.
+
+```bash
+curl -X PATCH "$REIN_URL/admin/v1/keys/key_..." \
+  -H "Authorization: Bearer $REIN_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "daily_budget_usd": 200,
+    "max_concurrent": 10,
+    "rps_limit": 20
+  }'
+```
+
+Response is the full key view with the updated fields:
+
+```json
+{
+  "id": "key_...",
+  "name": "prod-app",
+  "upstream": "openai",
+  "daily_budget_usd": 200,
+  "month_budget_usd": 2000,
+  "rps_limit": 20,
+  "rpm_limit": 300,
+  "max_concurrent": 10,
+  "created_at": "2026-04-10T12:00:00Z"
+}
+```
+
+The response never includes `token` or `upstream_key`.
+
+Common use cases:
+
+- Raise a per-key rate limit for a scheduled load test and lower it after.
+- Extend a daily budget when a customer spikes legitimately.
+- Lower `max_concurrent` when the upstream rate-limits harder than expected.
+- Point an OpenAI-compatible key at a new `upstream_base_url` without rotating
+  the rein token (e.g., migrating from Together to Fireworks).
+
 ### Revoke a key
 
 Revocation is immediate and permanent. Subsequent requests using that token
