@@ -228,7 +228,8 @@ curl -X POST -H "Authorization: Bearer $REIN_ADMIN_TOKEN" \
 # Every subsequent /v1/* call now returns:
 #   HTTP/1.1 503 Service Unavailable
 #   Retry-After: 60
-#   rein is frozen: kill-switch engaged
+#   Content-Type: application/json
+#   {"error":{"code":"kill_switch_engaged","message":"rein is frozen: kill-switch engaged"}}
 
 # Unfreeze
 curl -X POST -H "Authorization: Bearer $REIN_ADMIN_TOKEN" \

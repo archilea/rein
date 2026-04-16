@@ -12,6 +12,14 @@ import (
 	"github.com/archilea/rein/internal/killswitch"
 )
 
+// errorEnvelope mirrors the api.errorEnvelope shape for test assertions.
+type errorEnvelope struct {
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
 const testToken = "test-admin-token"
 
 func newTestServer(t *testing.T) (*Server, *killswitch.Memory, *keys.Memory, *http.ServeMux) {
@@ -320,7 +328,7 @@ func TestAdmin_CreateKey_UpstreamBaseURLRejectsAnthropic(t *testing.T) {
 		t.Fatalf("status: got %d want 400", rec.Code)
 	}
 
-	var env apiError
+	var env errorEnvelope
 	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
 		t.Fatalf("decode envelope: %v; body=%s", err, rec.Body.String())
 	}
@@ -350,7 +358,7 @@ func TestAdmin_CreateKey_InvalidUpstreamBaseURL(t *testing.T) {
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status: got %d want 400; body=%s", rec.Code, rec.Body.String())
 			}
-			var env apiError
+			var env errorEnvelope
 			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
 				t.Fatalf("decode envelope: %v; body=%s", err, rec.Body.String())
 			}

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Structured JSON errors on proxy endpoints** (#75). Every proxy-side
+  error response (`/v1/*` short-circuits: 401, 400, 402, 429, 503, 404)
+  now returns a `{"error": {"code": "...", "message": "..."}}` JSON
+  envelope instead of plain text. The envelope shape matches the admin
+  API format shipped in 0.2. Status codes and `Retry-After` headers are
+  unchanged. Stable error codes (`missing_key`, `invalid_key`,
+  `key_revoked`, `upstream_mismatch`, `budget_exceeded`, `rate_limited`,
+  `concurrency_exceeded`, `kill_switch_engaged`, `unknown_route`,
+  `internal_error`) are defined as constants in `internal/proxy/errcodes.go`
+  so machine clients can branch on `code` instead of substring-matching
+  messages. The `writeAPIError` and `writeJSON` helpers are extracted to
+  a shared `internal/api` package used by both admin and proxy surfaces.
+  See `docs/admin-api.md` for the full error code catalog.
+
 ## [0.2.0] - 2026-04-15
 
 ### Added

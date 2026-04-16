@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +19,29 @@ import (
 	"github.com/archilea/rein/internal/meter"
 	"github.com/archilea/rein/internal/rates"
 )
+
+// errorEnvelope mirrors the api.errorEnvelope shape for test assertions.
+type errorEnvelope struct {
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// requireErrorCode unmarshals a structured error body and asserts its code.
+func requireErrorCode(t *testing.T, rec *httptest.ResponseRecorder, wantCode string) {
+	t.Helper()
+	var env errorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode error envelope: %v; body=%s", err, rec.Body.String())
+	}
+	if env.Error.Code != wantCode {
+		t.Errorf("error code: got %q want %q", env.Error.Code, wantCode)
+	}
+	if env.Error.Message == "" {
+		t.Errorf("error message should be non-empty for code %q", wantCode)
+	}
+}
 
 // newTestProxy builds a Proxy wired with a fresh in-memory kill-switch,
 // in-memory meter, and the embedded pricing table.
@@ -128,6 +153,7 @@ func TestProxy_MissingKey(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("missing key: got %d want 401", rec.Code)
 	}
+	requireErrorCode(t, rec, CodeMissingKey)
 }
 
 func TestProxy_InvalidKey(t *testing.T) {
@@ -142,6 +168,7 @@ func TestProxy_InvalidKey(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("invalid key: got %d want 401", rec.Code)
 	}
+	requireErrorCode(t, rec, CodeInvalidKey)
 }
 
 func TestProxy_UpstreamMismatch(t *testing.T) {
@@ -157,6 +184,7 @@ func TestProxy_UpstreamMismatch(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("mismatch: got %d want 400", rec.Code)
 	}
+	requireErrorCode(t, rec, CodeUpstreamMismatch)
 }
 
 func TestProxy_RevokedKey(t *testing.T) {
@@ -174,6 +202,7 @@ func TestProxy_RevokedKey(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("revoked: got %d want 401", rec.Code)
 	}
+	requireErrorCode(t, rec, CodeKeyRevoked)
 }
 
 func TestProxy_UnknownPath(t *testing.T) {
@@ -185,6 +214,7 @@ func TestProxy_UnknownPath(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("unknown path: got %d want 404", rec.Code)
 	}
+	requireErrorCode(t, rec, CodeUnknownRoute)
 }
 
 func TestProxy_FrozenReturns503(t *testing.T) {
@@ -210,6 +240,7 @@ func TestProxy_FrozenReturns503(t *testing.T) {
 	if got := rec.Header().Get("Retry-After"); got == "" {
 		t.Errorf("expected Retry-After header on 503")
 	}
+	requireErrorCode(t, rec, CodeKillSwitchEngaged)
 }
 
 func TestProxy_PassthroughWhenStoreNil(t *testing.T) {
@@ -275,6 +306,7 @@ func TestProxy_BudgetExceededReturns402(t *testing.T) {
 	if rec.Code != http.StatusPaymentRequired {
 		t.Errorf("budget breach: got %d want 402", rec.Code)
 	}
+	requireErrorCode(t, rec, CodeBudgetExceeded)
 }
 
 func TestProxy_SpendIsRecordedAfterUpstream(t *testing.T) {
@@ -328,6 +360,7 @@ func TestProxy_SpendIsRecordedAfterUpstream(t *testing.T) {
 	if rec3.Code != http.StatusPaymentRequired {
 		t.Errorf("third request: got %d want 402 (spend=$25 > $20 cap)", rec3.Code)
 	}
+	requireErrorCode(t, rec3, CodeBudgetExceeded)
 }
 
 // TestProxy_OpenAIStreamRecordsSpend verifies that a streaming OpenAI request
@@ -396,6 +429,7 @@ func TestProxy_OpenAIStreamRecordsSpend(t *testing.T) {
 	if rec3.Code != http.StatusPaymentRequired {
 		t.Errorf("third stream: got %d want 402 (spend=$25 > $20 cap)", rec3.Code)
 	}
+	requireErrorCode(t, rec3, CodeBudgetExceeded)
 }
 
 // newRateLimitedKey creates a key with explicit rate limits.
@@ -467,6 +501,7 @@ func TestProxy_RateLimitReturns429(t *testing.T) {
 	if got := rec2.Header().Get("Retry-After"); got == "" {
 		t.Error("expected Retry-After header on 429")
 	}
+	requireErrorCode(t, rec2, CodeRateLimited)
 	if upstreamCalled {
 		t.Error("upstream should NOT be contacted on rate-limited request")
 	}
@@ -498,6 +533,7 @@ func TestProxy_BudgetCheckBeforeRateLimit(t *testing.T) {
 	if rec.Code != http.StatusPaymentRequired {
 		t.Errorf("budget+rate: got %d want 402 (budget should fire first)", rec.Code)
 	}
+	requireErrorCode(t, rec, CodeBudgetExceeded)
 }
 
 func TestProxy_NilRatesStoreIsNoop(t *testing.T) {
@@ -636,7 +672,15 @@ func TestProxy_ConcurrencyLimitReturns429(t *testing.T) {
 	if got := resp.Header.Get("Retry-After"); got != "1" {
 		t.Errorf("Retry-After: got %q want %q", got, "1")
 	}
+	respBody, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
+	var env errorEnvelope
+	if err := json.Unmarshal(respBody, &env); err != nil {
+		t.Fatalf("decode error envelope: %v; body=%s", err, respBody)
+	}
+	if env.Error.Code != CodeConcurrencyExceeded {
+		t.Errorf("error code: got %q want %q", env.Error.Code, CodeConcurrencyExceeded)
+	}
 	if upstreamHits.Load() != upstreamBefore {
 		t.Error("upstream was contacted on concurrency-rejected request")
 	}
@@ -859,4 +903,37 @@ func TestProxy_UnlimitedKeyNeverTouchesConcurrencyStore(t *testing.T) {
 	if got := cs.InFlight(vk.ID); got != 0 {
 		t.Errorf("unlimited key should never touch the store, got InFlight=%d", got)
 	}
+}
+
+// --- internal error test (issue #75) ---
+
+// failingSwitch is a kill-switch that always returns an error, used to
+// exercise the CodeInternalError path in ServeHTTP.
+type failingSwitch struct{}
+
+func (failingSwitch) IsFrozen(_ context.Context) (bool, error) {
+	return false, errors.New("injected kill-switch failure")
+}
+
+func (failingSwitch) SetFrozen(_ context.Context, _ bool) error {
+	return errors.New("injected kill-switch failure")
+}
+
+func TestProxy_KillSwitchErrorReturnsInternalError(t *testing.T) {
+	store, vk := newTestKey(t, keys.UpstreamOpenAI, "sk-real")
+	pricer, _ := meter.LoadPricer()
+	p, err := New(store, failingSwitch{}, meter.NewMemory(), nil, nil, meter.NewPricerHolder(pricer), "https://api.openai.com", "https://api.anthropic.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer "+vk.Token)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("kill-switch error: got %d want 500", rec.Code)
+	}
+	requireErrorCode(t, rec, CodeInternalError)
 }
