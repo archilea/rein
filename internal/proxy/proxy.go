@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/archilea/rein/internal/api"
 	"github.com/archilea/rein/internal/concurrency"
 	"github.com/archilea/rein/internal/keys"
 	"github.com/archilea/rein/internal/killswitch"
@@ -140,7 +141,7 @@ func expectedUpstreamForPath(path string) string {
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	wantUpstream := expectedUpstreamForPath(r.URL.Path)
 	if wantUpstream == "" {
-		http.Error(w, "unknown upstream route", http.StatusNotFound)
+		api.WriteError(w, http.StatusNotFound, CodeUnknownRoute, "unknown upstream route")
 		return
 	}
 
@@ -149,12 +150,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		frozen, ksErr := p.killSwitch.IsFrozen(r.Context())
 		if ksErr != nil {
 			slog.Error("kill-switch read failed", "err", ksErr)
-			http.Error(w, "kill-switch check failed", http.StatusInternalServerError)
+			api.WriteError(w, http.StatusInternalServerError, CodeInternalError, "kill-switch check failed")
 			return
 		}
 		if frozen {
 			w.Header().Set("Retry-After", "60")
-			http.Error(w, "rein is frozen: kill-switch engaged", http.StatusServiceUnavailable)
+			api.WriteError(w, http.StatusServiceUnavailable, CodeKillSwitchEngaged, "rein is frozen: kill-switch engaged")
 			return
 		}
 	}
@@ -163,28 +164,28 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, errMissingKey):
-			http.Error(w, "missing rein key", http.StatusUnauthorized)
+			api.WriteError(w, http.StatusUnauthorized, CodeMissingKey, "missing rein key")
 		case errors.Is(err, errInvalidKey):
-			http.Error(w, "invalid rein key", http.StatusUnauthorized)
+			api.WriteError(w, http.StatusUnauthorized, CodeInvalidKey, "invalid rein key")
 		default:
-			http.Error(w, "key resolution failed", http.StatusInternalServerError)
+			api.WriteError(w, http.StatusInternalServerError, CodeInternalError, "key resolution failed")
 		}
 		return
 	}
 
 	if vkey != nil {
 		if vkey.IsRevoked() {
-			http.Error(w, "virtual key revoked", http.StatusUnauthorized)
+			api.WriteError(w, http.StatusUnauthorized, CodeKeyRevoked, "virtual key revoked")
 			return
 		}
 		if vkey.Upstream != wantUpstream {
-			http.Error(w, "rein key upstream does not match request path", http.StatusBadRequest)
+			api.WriteError(w, http.StatusBadRequest, CodeUpstreamMismatch, "rein key upstream does not match request path")
 			return
 		}
 		if p.meter != nil && (vkey.DailyBudgetUSD > 0 || vkey.MonthBudgetUSD > 0) {
 			if err := p.meter.Check(r.Context(), vkey.ID, vkey.DailyBudgetUSD, vkey.MonthBudgetUSD); err != nil {
 				if errors.Is(err, meter.ErrBudgetExceeded) {
-					http.Error(w, "budget exceeded for this virtual key", http.StatusPaymentRequired)
+					api.WriteError(w, http.StatusPaymentRequired, CodeBudgetExceeded, "budget exceeded for this virtual key")
 					return
 				}
 				// Fail open on meter errors. The kill-switch is the independent hard stop.
@@ -200,7 +201,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						retryAfter = strconv.Itoa(ra)
 					}
 					w.Header().Set("Retry-After", retryAfter)
-					http.Error(w, "rate limit exceeded for this virtual key", http.StatusTooManyRequests)
+					api.WriteError(w, http.StatusTooManyRequests, CodeRateLimited, "rate limit exceeded for this virtual key")
 					return
 				}
 				// Fail open on rate limiter errors, same as meter.
@@ -216,7 +217,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if p.concurrency != nil && vkey.MaxConcurrent > 0 {
 			if !p.concurrency.Acquire(vkey.ID, vkey.MaxConcurrent) {
 				w.Header().Set("Retry-After", "1")
-				http.Error(w, "concurrency limit exceeded for this virtual key", http.StatusTooManyRequests)
+				api.WriteError(w, http.StatusTooManyRequests, CodeConcurrencyExceeded, "concurrency limit exceeded for this virtual key")
 				return
 			}
 			defer p.concurrency.Release(vkey.ID, vkey.MaxConcurrent)
@@ -230,7 +231,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case keys.UpstreamAnthropic:
 		p.anthropic.ServeHTTP(w, r)
 	default:
-		http.Error(w, "no handler for upstream", http.StatusInternalServerError)
+		api.WriteError(w, http.StatusInternalServerError, CodeInternalError, "no handler for upstream")
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/archilea/rein/internal/api"
 	"github.com/archilea/rein/internal/keys"
 	"github.com/archilea/rein/internal/killswitch"
 )
@@ -70,7 +71,7 @@ func (s *Server) handleGetFreeze(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"frozen": frozen})
+	api.WriteJSON(w, http.StatusOK, map[string]bool{"frozen": frozen})
 }
 
 func (s *Server) handleSetFreeze(w http.ResponseWriter, r *http.Request) {
@@ -87,33 +88,7 @@ func (s *Server) handleSetFreeze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Info("killswitch state changed", "frozen", body.Frozen)
-	writeJSON(w, http.StatusOK, map[string]bool{"frozen": body.Frozen})
-}
-
-func writeJSON(w http.ResponseWriter, code int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(body)
-}
-
-// apiError is the standard error envelope returned by the admin API for
-// validation failures that carry a stable, machine-readable code. The
-// envelope shape is intentionally small and matches the idiom used by
-// most modern admin APIs so #16 (admin API error standardization) can
-// retrofit the rest of the surface to the same shape without a breaking
-// change.
-type apiError struct {
-	Error struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
-}
-
-func writeAPIError(w http.ResponseWriter, status int, code, message string) {
-	var e apiError
-	e.Error.Code = code
-	e.Error.Message = message
-	writeJSON(w, status, e)
+	api.WriteJSON(w, http.StatusOK, map[string]bool{"frozen": body.Frozen})
 }
 
 // keyView is the safe projection of a VirtualKey for list/get responses.
@@ -207,7 +182,7 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	canonicalBaseURL := ""
 	if strings.TrimSpace(body.UpstreamBaseURL) != "" {
 		if body.Upstream != keys.UpstreamOpenAI {
-			writeAPIError(w, http.StatusBadRequest,
+			api.WriteError(w, http.StatusBadRequest,
 				keys.ErrCodeInvalidBaseURL,
 				"upstream_base_url is only supported when upstream is 'openai'")
 			return
@@ -215,10 +190,10 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		canonical, err := keys.ValidateUpstreamBaseURL(body.UpstreamBaseURL)
 		if err != nil {
 			if bue := keys.AsBaseURLError(err); bue != nil {
-				writeAPIError(w, http.StatusBadRequest, bue.Code, bue.Message)
+				api.WriteError(w, http.StatusBadRequest, bue.Code, bue.Message)
 				return
 			}
-			writeAPIError(w, http.StatusBadRequest,
+			api.WriteError(w, http.StatusBadRequest,
 				keys.ErrCodeInvalidBaseURL, "invalid upstream_base_url")
 			return
 		}
@@ -259,7 +234,7 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("virtual key created", "id", vk.ID, "name", vk.Name, "upstream", vk.Upstream)
-	writeJSON(w, http.StatusCreated, createKeyResponse{
+	api.WriteJSON(w, http.StatusCreated, createKeyResponse{
 		keyView: viewOf(vk),
 		Token:   vk.Token,
 	})
@@ -276,7 +251,7 @@ func (s *Server) handleListKeys(w http.ResponseWriter, r *http.Request) {
 	for _, k := range all {
 		out = append(out, viewOf(k))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"keys": out})
+	api.WriteJSON(w, http.StatusOK, map[string]any{"keys": out})
 }
 
 func (s *Server) handleRevokeKey(w http.ResponseWriter, r *http.Request) {
@@ -305,5 +280,5 @@ func (s *Server) handleRevokeKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Info("virtual key revoked", "id", vk.ID)
-	writeJSON(w, http.StatusOK, viewOf(vk))
+	api.WriteJSON(w, http.StatusOK, viewOf(vk))
 }

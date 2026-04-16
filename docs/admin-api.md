@@ -55,8 +55,9 @@ Every subsequent `/v1/*` request now returns:
 ```
 HTTP/1.1 503 Service Unavailable
 Retry-After: 60
+Content-Type: application/json
 
-rein is frozen: kill-switch engaged
+{"error":{"code":"kill_switch_engaged","message":"rein is frozen: kill-switch engaged"}}
 ```
 
 ### Unfreeze
@@ -246,6 +247,42 @@ Operator formula: `per_replica_limit = desired_global_limit / replica_count`.
 A globally-synchronized variant (a distributed semaphore via Redis, or
 similar) is out of scope for 0.2 but slots in behind the same `Store`
 interface without rewriting the hot path.
+
+## Proxy error response format
+
+Every proxy-side error (`/v1/*` requests) returns a structured JSON envelope
+so machine clients can branch on a stable `code` string rather than
+substring-matching the message:
+
+```json
+{
+  "error": {
+    "code": "budget_exceeded",
+    "message": "budget exceeded for this virtual key"
+  }
+}
+```
+
+The same envelope shape is used by the admin API for validation errors.
+Headers (`Retry-After`, status codes) are unchanged from prior releases.
+
+### Error code catalog
+
+| Status | Code | When |
+|--------|------|------|
+| 404 | `unknown_route` | Request path is not a known `/v1/*` upstream route |
+| 503 | `kill_switch_engaged` | Global kill-switch is frozen |
+| 401 | `missing_key` | No `Authorization: Bearer` header present |
+| 401 | `invalid_key` | Token does not match any row or is malformed |
+| 401 | `key_revoked` | Token matches a revoked key |
+| 400 | `upstream_mismatch` | Key's upstream does not match the request path |
+| 402 | `budget_exceeded` | Daily or monthly USD cap already reached |
+| 429 | `rate_limited` | RPS or RPM sliding window cap exceeded |
+| 429 | `concurrency_exceeded` | Per-key in-flight cap reached |
+| 500 | `internal_error` | Unexpected server-side failure |
+
+`rate_limited` and `concurrency_exceeded` responses include a `Retry-After`
+header. `kill_switch_engaged` includes `Retry-After: 60`.
 
 ## Health and version
 
