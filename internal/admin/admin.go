@@ -23,6 +23,11 @@ import (
 	"github.com/archilea/rein/internal/killswitch"
 )
 
+// immutableFieldError is the structured error code returned when a PATCH
+// request attempts to change an immutable field (id, token, upstream,
+// upstream_key, created_at, revoked_at).
+const immutableFieldError = "immutable_field"
+
 // Server exposes Rein's admin endpoints.
 type Server struct {
 	token      string
@@ -48,6 +53,7 @@ func (s *Server) Mount(mux *http.ServeMux) {
 	if s.keys != nil {
 		mux.Handle("POST /admin/v1/keys", s.withAuth(s.handleCreateKey))
 		mux.Handle("GET /admin/v1/keys", s.withAuth(s.handleListKeys))
+		mux.Handle("PATCH /admin/v1/keys/{id}", s.withAuth(s.handleUpdateKey))
 		mux.Handle("POST /admin/v1/keys/{id}/revoke", s.withAuth(s.handleRevokeKey))
 	}
 }
@@ -281,4 +287,138 @@ func (s *Server) handleRevokeKey(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("virtual key revoked", "id", vk.ID)
 	api.WriteJSON(w, http.StatusOK, viewOf(vk))
+}
+
+func (s *Server) handleUpdateKey(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !keys.ValidID(id) {
+		http.Error(w, "invalid key id", http.StatusBadRequest)
+		return
+	}
+
+	var body struct {
+		// Mutable fields. Nil means "leave unchanged".
+		Name            *string  `json:"name,omitempty"`
+		DailyBudgetUSD  *float64 `json:"daily_budget_usd,omitempty"`
+		MonthBudgetUSD  *float64 `json:"month_budget_usd,omitempty"`
+		RPSLimit        *int     `json:"rps_limit,omitempty"`
+		RPMLimit        *int     `json:"rpm_limit,omitempty"`
+		MaxConcurrent   *int     `json:"max_concurrent,omitempty"`
+		UpstreamBaseURL *string  `json:"upstream_base_url,omitempty"`
+
+		// Immutable field probes. Non-nil means the client attempted to
+		// change an immutable field, which is rejected with 400.
+		ID          *json.RawMessage `json:"id,omitempty"`
+		Token       *json.RawMessage `json:"token,omitempty"`
+		Upstream    *json.RawMessage `json:"upstream,omitempty"`
+		UpstreamKey *json.RawMessage `json:"upstream_key,omitempty"`
+		CreatedAt   *json.RawMessage `json:"created_at,omitempty"`
+		RevokedAt   *json.RawMessage `json:"revoked_at,omitempty"`
+	}
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+
+	if body.ID != nil || body.Token != nil || body.Upstream != nil ||
+		body.UpstreamKey != nil || body.CreatedAt != nil || body.RevokedAt != nil {
+		api.WriteError(w, http.StatusBadRequest, immutableFieldError,
+			"id, token, upstream, upstream_key, created_at, and revoked_at cannot be changed")
+		return
+	}
+
+	// Validate mutable fields using the same rules as handleCreateKey.
+	if body.Name != nil {
+		name := strings.TrimSpace(*body.Name)
+		if name == "" {
+			http.Error(w, "name must not be blank", http.StatusBadRequest)
+			return
+		}
+		if len(name) > 100 {
+			http.Error(w, "name must be 100 characters or fewer", http.StatusBadRequest)
+			return
+		}
+		body.Name = &name
+	}
+	if (body.DailyBudgetUSD != nil && *body.DailyBudgetUSD < 0) ||
+		(body.MonthBudgetUSD != nil && *body.MonthBudgetUSD < 0) {
+		http.Error(w, "budgets must be non-negative", http.StatusBadRequest)
+		return
+	}
+	if (body.RPSLimit != nil && *body.RPSLimit < 0) ||
+		(body.RPMLimit != nil && *body.RPMLimit < 0) {
+		http.Error(w, "rate limits must be non-negative", http.StatusBadRequest)
+		return
+	}
+	if body.MaxConcurrent != nil && *body.MaxConcurrent < 0 {
+		http.Error(w, "max_concurrent must be non-negative", http.StatusBadRequest)
+		return
+	}
+
+	// upstream_base_url validation requires the key's immutable upstream field.
+	var canonicalBaseURL *string
+	if body.UpstreamBaseURL != nil {
+		raw := strings.TrimSpace(*body.UpstreamBaseURL)
+		if raw != "" {
+			current, err := s.keys.GetByID(r.Context(), id)
+			if err != nil {
+				if errors.Is(err, keys.ErrNotFound) {
+					http.Error(w, "key not found", http.StatusNotFound)
+					return
+				}
+				slog.Error("get key for update validation", "err", err, "id", id)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			if current.Upstream != keys.UpstreamOpenAI {
+				api.WriteError(w, http.StatusBadRequest,
+					keys.ErrCodeInvalidBaseURL,
+					"upstream_base_url is only supported when upstream is 'openai'")
+				return
+			}
+			canonical, err := keys.ValidateUpstreamBaseURL(raw)
+			if err != nil {
+				if bue := keys.AsBaseURLError(err); bue != nil {
+					api.WriteError(w, http.StatusBadRequest, bue.Code, bue.Message)
+					return
+				}
+				api.WriteError(w, http.StatusBadRequest,
+					keys.ErrCodeInvalidBaseURL, "invalid upstream_base_url")
+				return
+			}
+			raw = canonical
+		}
+		canonicalBaseURL = &raw
+	}
+
+	patch := keys.KeyPatch{
+		Name:            body.Name,
+		DailyBudgetUSD:  body.DailyBudgetUSD,
+		MonthBudgetUSD:  body.MonthBudgetUSD,
+		RPSLimit:        body.RPSLimit,
+		RPMLimit:        body.RPMLimit,
+		MaxConcurrent:   body.MaxConcurrent,
+		UpstreamBaseURL: canonicalBaseURL,
+	}
+
+	updated, err := s.keys.Update(r.Context(), id, patch)
+	if err != nil {
+		if errors.Is(err, keys.ErrNotFound) {
+			http.Error(w, "key not found", http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, keys.ErrRevoked) {
+			api.WriteError(w, http.StatusConflict, "key_revoked",
+				"cannot update a revoked key")
+			return
+		}
+		slog.Error("update virtual key", "err", err, "id", id)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	slog.Info("virtual key updated", "id", updated.ID)
+	api.WriteJSON(w, http.StatusOK, viewOf(updated))
 }

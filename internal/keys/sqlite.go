@@ -270,6 +270,41 @@ func (s *SQLite) Revoke(ctx context.Context, id string) error {
 	return nil
 }
 
+// Update applies a partial update to an active key.
+// Returns ErrNotFound if the key does not exist and ErrRevoked if revoked.
+func (s *SQLite) Update(ctx context.Context, id string, patch KeyPatch) (*VirtualKey, error) {
+	current, err := s.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if current.IsRevoked() {
+		return nil, ErrRevoked
+	}
+
+	patch.ApplyTo(current)
+
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE virtual_keys SET
+			name = ?, daily_budget_usd = ?, month_budget_usd = ?,
+			upstream_base_url = ?, rps_limit = ?, rpm_limit = ?, max_concurrent = ?
+		WHERE id = ? AND revoked_at IS NULL`,
+		current.Name, current.DailyBudgetUSD, current.MonthBudgetUSD,
+		current.UpstreamBaseURL, current.RPSLimit, current.RPMLimit, current.MaxConcurrent,
+		id)
+	if err != nil {
+		return nil, fmt.Errorf("update virtual key: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("update rows affected: %w", err)
+	}
+	if n == 0 {
+		// Between the SELECT and the UPDATE, the key was revoked.
+		return nil, ErrRevoked
+	}
+	return current, nil
+}
+
 // scanKey reads a single virtual_keys row via the supplied Scan function
 // (either *sql.Row.Scan or *sql.Rows.Scan) and decrypts the upstream_key column.
 func (s *SQLite) scanKey(scan func(dest ...any) error) (*VirtualKey, error) {

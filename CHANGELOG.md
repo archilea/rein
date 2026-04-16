@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Update a key's caps without re-minting** (#74). New
+  `PATCH /admin/v1/keys/{id}` endpoint lets operators change a virtual
+  key's `name`, `daily_budget_usd`, `month_budget_usd`, `rps_limit`,
+  `rpm_limit`, `max_concurrent`, and `upstream_base_url` on an
+  already-minted key. Immutable fields (`id`, `token`, `upstream`,
+  `upstream_key`, `created_at`, `revoked_at`) are rejected with `400`
+  and a structured error envelope. Revoked keys return `409 Conflict`.
+  Partial updates are explicit: only fields present in the JSON body
+  are changed; absent fields are preserved; zero values explicitly set
+  the cap to unlimited. Validation reuses the same rules as
+  `POST /admin/v1/keys`. The `keys.Store` interface gains an `Update`
+  method implemented by both `Memory` and `SQLite` stores. See
+  `docs/admin-api.md` for the full endpoint documentation.
+
 ### Changed
 
 - **Structured JSON errors on proxy endpoints** (#75). Every proxy-side

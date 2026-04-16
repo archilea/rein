@@ -834,3 +834,238 @@ func TestSQLite_WrongCipherCannotDecrypt(t *testing.T) {
 		t.Error("expected decrypt failure when opening with a different encryption key")
 	}
 }
+
+// --- Update tests ---
+
+func TestSQLite_UpdatePartial(t *testing.T) {
+	s := newTestSQLite(t)
+	vk := mustCreate(t, s, "original", UpstreamOpenAI, "sk-x")
+	vk.DailyBudgetUSD = 100
+	// mustCreate doesn't set budgets, so patch them in directly via SQL for setup.
+	_, err := s.db.Exec(`UPDATE virtual_keys SET daily_budget_usd=100, month_budget_usd=500, rps_limit=10, max_concurrent=20 WHERE id=?`, vk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newName := "renamed"
+	newBudget := 200.0
+	updated, err := s.Update(context.Background(), vk.ID, KeyPatch{
+		Name:           &newName,
+		DailyBudgetUSD: &newBudget,
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if updated.Name != "renamed" {
+		t.Errorf("name: got %q want renamed", updated.Name)
+	}
+	if updated.DailyBudgetUSD != 200 {
+		t.Errorf("daily_budget_usd: got %v want 200", updated.DailyBudgetUSD)
+	}
+	// Unpatched fields preserved.
+	if updated.MonthBudgetUSD != 500 {
+		t.Errorf("month_budget_usd: got %v want 500 (preserved)", updated.MonthBudgetUSD)
+	}
+	if updated.RPSLimit != 10 {
+		t.Errorf("rps_limit: got %d want 10 (preserved)", updated.RPSLimit)
+	}
+	if updated.MaxConcurrent != 20 {
+		t.Errorf("max_concurrent: got %d want 20 (preserved)", updated.MaxConcurrent)
+	}
+
+	// Verify it persisted by re-reading.
+	got, err := s.GetByID(context.Background(), vk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "renamed" || got.DailyBudgetUSD != 200 {
+		t.Errorf("persisted: name=%q daily=%v", got.Name, got.DailyBudgetUSD)
+	}
+}
+
+func TestSQLite_UpdateZeroMeansUnlimited(t *testing.T) {
+	s := newTestSQLite(t)
+	vk := mustCreate(t, s, "capped", UpstreamOpenAI, "sk-x")
+	_, err := s.db.Exec(`UPDATE virtual_keys SET daily_budget_usd=100, rps_limit=10 WHERE id=?`, vk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	zeroBudget := 0.0
+	zeroRPS := 0
+	updated, err := s.Update(context.Background(), vk.ID, KeyPatch{
+		DailyBudgetUSD: &zeroBudget,
+		RPSLimit:       &zeroRPS,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.DailyBudgetUSD != 0 {
+		t.Errorf("daily_budget_usd: got %v want 0", updated.DailyBudgetUSD)
+	}
+	if updated.RPSLimit != 0 {
+		t.Errorf("rps_limit: got %d want 0", updated.RPSLimit)
+	}
+}
+
+func TestSQLite_UpdateNotFound(t *testing.T) {
+	s := newTestSQLite(t)
+	name := "new"
+	_, err := s.Update(context.Background(), "key_0000000000000000", KeyPatch{Name: &name})
+	if err != ErrNotFound {
+		t.Errorf("got %v want ErrNotFound", err)
+	}
+}
+
+func TestSQLite_UpdateRevokedKeyRejected(t *testing.T) {
+	s := newTestSQLite(t)
+	vk := mustCreate(t, s, "soon-revoked", UpstreamOpenAI, "sk-x")
+	if err := s.Revoke(context.Background(), vk.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	name := "new-name"
+	_, err := s.Update(context.Background(), vk.ID, KeyPatch{Name: &name})
+	if err != ErrRevoked {
+		t.Errorf("got %v want ErrRevoked", err)
+	}
+}
+
+func TestSQLite_UpdateEmptyPatchNoOp(t *testing.T) {
+	s := newTestSQLite(t)
+	vk := mustCreate(t, s, "stable", UpstreamOpenAI, "sk-x")
+
+	updated, err := s.Update(context.Background(), vk.ID, KeyPatch{})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if updated.Name != "stable" {
+		t.Errorf("name changed on empty patch: got %q", updated.Name)
+	}
+}
+
+func TestSQLite_UpdateUpstreamBaseURL(t *testing.T) {
+	s := newTestSQLite(t)
+	id, _ := GenerateID()
+	token, _ := GenerateToken()
+	vk := &VirtualKey{
+		ID:              id,
+		Token:           token,
+		Name:            "groq",
+		Upstream:        UpstreamOpenAI,
+		UpstreamKey:     "gsk-x",
+		UpstreamBaseURL: "https://api.groq.com",
+		CreatedAt:       time.Now().UTC(),
+	}
+	if err := s.Create(context.Background(), vk); err != nil {
+		t.Fatal(err)
+	}
+
+	newURL := "https://api.fireworks.ai"
+	updated, err := s.Update(context.Background(), id, KeyPatch{UpstreamBaseURL: &newURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.UpstreamBaseURL != "https://api.fireworks.ai" {
+		t.Errorf("upstream_base_url: got %q", updated.UpstreamBaseURL)
+	}
+
+	// Verify persistence.
+	got, err := s.GetByID(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UpstreamBaseURL != "https://api.fireworks.ai" {
+		t.Errorf("persisted upstream_base_url: got %q", got.UpstreamBaseURL)
+	}
+}
+
+func TestMemory_UpdatePartial(t *testing.T) {
+	m := NewMemory()
+	vk := mustCreate(t, m, "original", UpstreamOpenAI, "sk-x")
+
+	newName := "renamed"
+	updated, err := m.Update(context.Background(), vk.ID, KeyPatch{Name: &newName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Name != "renamed" {
+		t.Errorf("name: got %q", updated.Name)
+	}
+
+	// Verify the returned copy is independent.
+	updated.Name = "tampered"
+	got, _ := m.GetByID(context.Background(), vk.ID)
+	if got.Name != "renamed" {
+		t.Errorf("store was mutated by caller: got %q", got.Name)
+	}
+}
+
+func TestMemory_UpdateAllFields(t *testing.T) {
+	m := NewMemory()
+	vk := mustCreate(t, m, "original", UpstreamOpenAI, "sk-x")
+
+	newName := "new-name"
+	newDaily := 10.0
+	newMonth := 200.0
+	newRPS := 5
+	newRPM := 100
+	newMC := 3
+	newURL := "https://api.groq.com"
+
+	updated, err := m.Update(context.Background(), vk.ID, KeyPatch{
+		Name:            &newName,
+		DailyBudgetUSD:  &newDaily,
+		MonthBudgetUSD:  &newMonth,
+		RPSLimit:        &newRPS,
+		RPMLimit:        &newRPM,
+		MaxConcurrent:   &newMC,
+		UpstreamBaseURL: &newURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Name != "new-name" {
+		t.Errorf("Name: got %q", updated.Name)
+	}
+	if updated.DailyBudgetUSD != 10 {
+		t.Errorf("DailyBudgetUSD: got %v", updated.DailyBudgetUSD)
+	}
+	if updated.MonthBudgetUSD != 200 {
+		t.Errorf("MonthBudgetUSD: got %v", updated.MonthBudgetUSD)
+	}
+	if updated.RPSLimit != 5 {
+		t.Errorf("RPSLimit: got %d", updated.RPSLimit)
+	}
+	if updated.RPMLimit != 100 {
+		t.Errorf("RPMLimit: got %d", updated.RPMLimit)
+	}
+	if updated.MaxConcurrent != 3 {
+		t.Errorf("MaxConcurrent: got %d", updated.MaxConcurrent)
+	}
+	if updated.UpstreamBaseURL != "https://api.groq.com" {
+		t.Errorf("UpstreamBaseURL: got %q", updated.UpstreamBaseURL)
+	}
+}
+
+func TestMemory_UpdateNotFound(t *testing.T) {
+	m := NewMemory()
+	name := "x"
+	_, err := m.Update(context.Background(), "key_0000000000000000", KeyPatch{Name: &name})
+	if err != ErrNotFound {
+		t.Errorf("got %v want ErrNotFound", err)
+	}
+}
+
+func TestMemory_UpdateRevokedKeyRejected(t *testing.T) {
+	m := NewMemory()
+	vk := mustCreate(t, m, "soon-revoked", UpstreamOpenAI, "sk-x")
+	if err := m.Revoke(context.Background(), vk.ID); err != nil {
+		t.Fatal(err)
+	}
+	name := "new"
+	_, err := m.Update(context.Background(), vk.ID, KeyPatch{Name: &name})
+	if err != ErrRevoked {
+		t.Errorf("got %v want ErrRevoked", err)
+	}
+}

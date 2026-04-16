@@ -129,6 +129,16 @@ func TestAdmin_InvalidBody(t *testing.T) {
 	}
 }
 
+func patchAuthed(t *testing.T, mux *http.ServeMux, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPatch, path, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
 func postAuthed(t *testing.T, mux *http.ServeMux, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
@@ -615,5 +625,383 @@ func TestAdmin_ListAndRevokeIncludeMaxConcurrent(t *testing.T) {
 	}
 	if revoked.MaxConcurrent != 7 {
 		t.Errorf("revoke: max_concurrent=%d want 7", revoked.MaxConcurrent)
+	}
+}
+
+// --- PATCH /admin/v1/keys/{id} tests ---
+
+// createTestKey is a helper that mints a key and returns its ID.
+func createTestKey(t *testing.T, mux *http.ServeMux, body string) string {
+	t.Helper()
+	rec := postAuthed(t, mux, "/admin/v1/keys", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create key: got %d want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	return resp.ID
+}
+
+func TestAdmin_UpdateKey_PartialUpdate(t *testing.T) {
+	_, _, store, mux := newTestServer(t)
+
+	id := createTestKey(t, mux,
+		`{"name":"original","upstream":"openai","upstream_key":"sk-x","daily_budget_usd":10,"month_budget_usd":100,"rps_limit":5,"rpm_limit":300,"max_concurrent":20}`)
+
+	// Patch only the name and daily budget.
+	rec := patchAuthed(t, mux, "/admin/v1/keys/"+id,
+		`{"name":"updated","daily_budget_usd":50}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch: got %d want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp keyView
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode patch: %v", err)
+	}
+	if resp.Name != "updated" {
+		t.Errorf("name: got %q want updated", resp.Name)
+	}
+	if resp.DailyBudgetUSD != 50 {
+		t.Errorf("daily_budget_usd: got %v want 50", resp.DailyBudgetUSD)
+	}
+	// Unpatched fields must be preserved.
+	if resp.MonthBudgetUSD != 100 {
+		t.Errorf("month_budget_usd: got %v want 100 (preserved)", resp.MonthBudgetUSD)
+	}
+	if resp.RPSLimit != 5 {
+		t.Errorf("rps_limit: got %d want 5 (preserved)", resp.RPSLimit)
+	}
+	if resp.RPMLimit != 300 {
+		t.Errorf("rpm_limit: got %d want 300 (preserved)", resp.RPMLimit)
+	}
+	if resp.MaxConcurrent != 20 {
+		t.Errorf("max_concurrent: got %d want 20 (preserved)", resp.MaxConcurrent)
+	}
+
+	// Verify the store matches the response.
+	vk, err := store.GetByID(context.Background(), id)
+	if err != nil {
+		t.Fatalf("store get: %v", err)
+	}
+	if vk.Name != "updated" || vk.DailyBudgetUSD != 50 || vk.MonthBudgetUSD != 100 {
+		t.Errorf("store mismatch: name=%q daily=%v month=%v",
+			vk.Name, vk.DailyBudgetUSD, vk.MonthBudgetUSD)
+	}
+}
+
+func TestAdmin_UpdateKey_ZeroMeansUnlimited(t *testing.T) {
+	_, _, store, mux := newTestServer(t)
+
+	id := createTestKey(t, mux,
+		`{"name":"capped","upstream":"openai","upstream_key":"sk-x","daily_budget_usd":100,"rps_limit":10,"max_concurrent":5}`)
+
+	// Explicitly set to zero to remove the cap.
+	rec := patchAuthed(t, mux, "/admin/v1/keys/"+id,
+		`{"daily_budget_usd":0,"rps_limit":0,"max_concurrent":0}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch: got %d want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	vk, err := store.GetByID(context.Background(), id)
+	if err != nil {
+		t.Fatalf("store get: %v", err)
+	}
+	if vk.DailyBudgetUSD != 0 {
+		t.Errorf("daily_budget_usd: got %v want 0 (unlimited)", vk.DailyBudgetUSD)
+	}
+	if vk.RPSLimit != 0 {
+		t.Errorf("rps_limit: got %d want 0 (unlimited)", vk.RPSLimit)
+	}
+	if vk.MaxConcurrent != 0 {
+		t.Errorf("max_concurrent: got %d want 0 (unlimited)", vk.MaxConcurrent)
+	}
+}
+
+func TestAdmin_UpdateKey_ImmutableFieldsRejected(t *testing.T) {
+	_, _, _, mux := newTestServer(t)
+
+	id := createTestKey(t, mux,
+		`{"name":"x","upstream":"openai","upstream_key":"sk-x"}`)
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"id", `{"id":"key_aaaaaaaaaaaaaaaa"}`},
+		{"token", `{"token":"rein_live_fake"}`},
+		{"upstream", `{"upstream":"anthropic"}`},
+		{"upstream_key", `{"upstream_key":"sk-new"}`},
+		{"created_at", `{"created_at":"2026-01-01T00:00:00Z"}`},
+		{"revoked_at", `{"revoked_at":"2026-01-01T00:00:00Z"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := patchAuthed(t, mux, "/admin/v1/keys/"+id, tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("got %d want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			var env errorEnvelope
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode envelope: %v; body=%s", err, rec.Body.String())
+			}
+			if env.Error.Code != immutableFieldError {
+				t.Errorf("error code: got %q want %q", env.Error.Code, immutableFieldError)
+			}
+		})
+	}
+}
+
+func TestAdmin_UpdateKey_UnknownFieldRejected(t *testing.T) {
+	_, _, _, mux := newTestServer(t)
+
+	id := createTestKey(t, mux,
+		`{"name":"x","upstream":"openai","upstream_key":"sk-x"}`)
+
+	rec := patchAuthed(t, mux, "/admin/v1/keys/"+id, `{"totally_fake_field":42}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("got %d want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdmin_UpdateKey_RevokedKeyRejected(t *testing.T) {
+	_, _, _, mux := newTestServer(t)
+
+	id := createTestKey(t, mux,
+		`{"name":"x","upstream":"openai","upstream_key":"sk-x"}`)
+
+	// Revoke the key first.
+	revRec := postAuthed(t, mux, "/admin/v1/keys/"+id+"/revoke", "")
+	if revRec.Code != http.StatusOK {
+		t.Fatalf("revoke: got %d want 200", revRec.Code)
+	}
+
+	rec := patchAuthed(t, mux, "/admin/v1/keys/"+id, `{"name":"new-name"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("got %d want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	var env errorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode envelope: %v; body=%s", err, rec.Body.String())
+	}
+	if env.Error.Code != "key_revoked" {
+		t.Errorf("error code: got %q want key_revoked", env.Error.Code)
+	}
+}
+
+func TestAdmin_UpdateKey_NotFound(t *testing.T) {
+	_, _, _, mux := newTestServer(t)
+
+	rec := patchAuthed(t, mux, "/admin/v1/keys/key_0000000000000000", `{"name":"new"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("got %d want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdmin_UpdateKey_InvalidFormat(t *testing.T) {
+	_, _, _, mux := newTestServer(t)
+	cases := []string{
+		"key_nope",
+		"token_a1b2c3d4e5f60718",
+		"key_A1B2C3D4E5F60718",
+		"key_a1b2c3d4e5f60718extra",
+	}
+	for _, id := range cases {
+		t.Run(id, func(t *testing.T) {
+			rec := patchAuthed(t, mux, "/admin/v1/keys/"+id, `{"name":"new"}`)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("id=%q: got %d want 400", id, rec.Code)
+			}
+		})
+	}
+}
+
+func TestAdmin_UpdateKey_ValidationRejectsInvalid(t *testing.T) {
+	_, _, _, mux := newTestServer(t)
+
+	id := createTestKey(t, mux,
+		`{"name":"x","upstream":"openai","upstream_key":"sk-x"}`)
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"blank name", `{"name":"   "}`},
+		{"name too long", `{"name":"` + strings.Repeat("a", 101) + `"}`},
+		{"negative daily budget", `{"daily_budget_usd":-1}`},
+		{"negative month budget", `{"month_budget_usd":-1}`},
+		{"negative rps_limit", `{"rps_limit":-1}`},
+		{"negative rpm_limit", `{"rpm_limit":-1}`},
+		{"negative max_concurrent", `{"max_concurrent":-1}`},
+		{"malformed json", `not json`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := patchAuthed(t, mux, "/admin/v1/keys/"+id, tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("got %d want 400; body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestAdmin_UpdateKey_DoesNotLeakSecrets(t *testing.T) {
+	_, _, _, mux := newTestServer(t)
+
+	createRec := postAuthed(t, mux, "/admin/v1/keys",
+		`{"name":"secret-check","upstream":"openai","upstream_key":"sk-super-secret"}`)
+	var created createKeyResponse
+	_ = json.Unmarshal(createRec.Body.Bytes(), &created)
+
+	rec := patchAuthed(t, mux, "/admin/v1/keys/"+created.ID, `{"name":"renamed"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch: got %d want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	raw := rec.Body.String()
+	if strings.Contains(raw, "sk-super-secret") {
+		t.Errorf("patch response leaked upstream key: %s", raw)
+	}
+	if strings.Contains(raw, "rein_live_") {
+		t.Errorf("patch response leaked rein token: %s", raw)
+	}
+}
+
+func TestAdmin_UpdateKey_EmptyBodyNoOp(t *testing.T) {
+	_, _, store, mux := newTestServer(t)
+
+	id := createTestKey(t, mux,
+		`{"name":"stable","upstream":"openai","upstream_key":"sk-x","daily_budget_usd":42}`)
+
+	rec := patchAuthed(t, mux, "/admin/v1/keys/"+id, `{}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch empty body: got %d want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	vk, err := store.GetByID(context.Background(), id)
+	if err != nil {
+		t.Fatalf("store get: %v", err)
+	}
+	if vk.Name != "stable" || vk.DailyBudgetUSD != 42 {
+		t.Errorf("no-op patch changed values: name=%q daily=%v", vk.Name, vk.DailyBudgetUSD)
+	}
+}
+
+func TestAdmin_UpdateKey_UpstreamBaseURL(t *testing.T) {
+	_, _, store, mux := newTestServer(t)
+
+	id := createTestKey(t, mux,
+		`{"name":"groq","upstream":"openai","upstream_key":"gsk-x","upstream_base_url":"https://api.groq.com"}`)
+
+	// Update base URL.
+	rec := patchAuthed(t, mux, "/admin/v1/keys/"+id,
+		`{"upstream_base_url":"https://api.fireworks.ai/inference/"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch: got %d want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp keyView
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.UpstreamBaseURL != "https://api.fireworks.ai/inference" {
+		t.Errorf("upstream_base_url: got %q want canonical form", resp.UpstreamBaseURL)
+	}
+
+	vk, err := store.GetByID(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vk.UpstreamBaseURL != "https://api.fireworks.ai/inference" {
+		t.Errorf("store: got %q", vk.UpstreamBaseURL)
+	}
+}
+
+func TestAdmin_UpdateKey_ClearUpstreamBaseURL(t *testing.T) {
+	_, _, store, mux := newTestServer(t)
+
+	id := createTestKey(t, mux,
+		`{"name":"groq","upstream":"openai","upstream_key":"gsk-x","upstream_base_url":"https://api.groq.com"}`)
+
+	// Clear by setting to empty string.
+	rec := patchAuthed(t, mux, "/admin/v1/keys/"+id, `{"upstream_base_url":""}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch: got %d want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	vk, err := store.GetByID(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vk.UpstreamBaseURL != "" {
+		t.Errorf("upstream_base_url after clear: got %q want empty", vk.UpstreamBaseURL)
+	}
+}
+
+func TestAdmin_UpdateKey_InvalidUpstreamBaseURL(t *testing.T) {
+	_, _, _, mux := newTestServer(t)
+
+	id := createTestKey(t, mux,
+		`{"name":"oai","upstream":"openai","upstream_key":"sk-x"}`)
+
+	cases := []struct {
+		name     string
+		url      string
+		wantCode string
+	}{
+		{"non-loopback http", "http://api.example.com", keys.ErrCodeInvalidBaseURLScheme},
+		{"ftp scheme", "ftp://api.example.com", keys.ErrCodeInvalidBaseURLScheme},
+		{"query included", "https://api.example.com?foo=bar", keys.ErrCodeInvalidBaseURLQuery},
+		{"fragment included", "https://api.example.com#f", keys.ErrCodeInvalidBaseURLFragment},
+		{"userinfo included", "https://user:pass@api.example.com", keys.ErrCodeInvalidBaseURLHost},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := patchAuthed(t, mux, "/admin/v1/keys/"+id,
+				`{"upstream_base_url":"`+tc.url+`"}`)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("got %d want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			var env errorEnvelope
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode envelope: %v; body=%s", err, rec.Body.String())
+			}
+			if env.Error.Code != tc.wantCode {
+				t.Errorf("error code: got %q want %q", env.Error.Code, tc.wantCode)
+			}
+		})
+	}
+}
+
+func TestAdmin_UpdateKey_UpstreamBaseURLRejectsAnthropic(t *testing.T) {
+	_, _, _, mux := newTestServer(t)
+
+	id := createTestKey(t, mux,
+		`{"name":"ant","upstream":"anthropic","upstream_key":"sk-ant-x"}`)
+
+	rec := patchAuthed(t, mux, "/admin/v1/keys/"+id,
+		`{"upstream_base_url":"https://api.example.com"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	var env errorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if env.Error.Code != keys.ErrCodeInvalidBaseURL {
+		t.Errorf("error code: got %q want %q", env.Error.Code, keys.ErrCodeInvalidBaseURL)
+	}
+}
+
+func TestAdmin_UpdateKey_RequiresAuth(t *testing.T) {
+	_, _, _, mux := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPatch, "/admin/v1/keys/key_0000000000000000",
+		strings.NewReader(`{"name":"new"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("got %d want 401", rec.Code)
 	}
 }

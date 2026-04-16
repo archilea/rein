@@ -33,6 +33,9 @@ const (
 // ErrNotFound is returned when a key lookup fails.
 var ErrNotFound = errors.New("virtual key not found")
 
+// ErrRevoked is returned when an update is attempted on a revoked key.
+var ErrRevoked = errors.New("virtual key is revoked")
+
 // VirtualKey is a Rein-issued bearer that maps to an upstream provider and API key.
 // All timestamps are UTC.
 type VirtualKey struct {
@@ -63,6 +66,45 @@ func (k *VirtualKey) IsRevoked() bool {
 	return k != nil && k.RevokedAt != nil
 }
 
+// KeyPatch holds the mutable fields for a partial key update.
+// Nil pointers mean "leave unchanged"; non-nil zero values mean
+// "set to zero" (which is "unlimited" for budgets and rate limits).
+type KeyPatch struct {
+	Name            *string
+	DailyBudgetUSD  *float64
+	MonthBudgetUSD  *float64
+	RPSLimit        *int
+	RPMLimit        *int
+	MaxConcurrent   *int
+	UpstreamBaseURL *string
+}
+
+// ApplyTo writes non-nil patch fields onto k. Callers are responsible
+// for checking preconditions (key exists, not revoked) before calling.
+func (p KeyPatch) ApplyTo(k *VirtualKey) {
+	if p.Name != nil {
+		k.Name = *p.Name
+	}
+	if p.DailyBudgetUSD != nil {
+		k.DailyBudgetUSD = *p.DailyBudgetUSD
+	}
+	if p.MonthBudgetUSD != nil {
+		k.MonthBudgetUSD = *p.MonthBudgetUSD
+	}
+	if p.RPSLimit != nil {
+		k.RPSLimit = *p.RPSLimit
+	}
+	if p.RPMLimit != nil {
+		k.RPMLimit = *p.RPMLimit
+	}
+	if p.MaxConcurrent != nil {
+		k.MaxConcurrent = *p.MaxConcurrent
+	}
+	if p.UpstreamBaseURL != nil {
+		k.UpstreamBaseURL = *p.UpstreamBaseURL
+	}
+}
+
 // Store is the persistence contract for virtual keys.
 // Implementations must be safe for concurrent use.
 type Store interface {
@@ -71,6 +113,10 @@ type Store interface {
 	GetByID(ctx context.Context, id string) (*VirtualKey, error)
 	List(ctx context.Context) ([]*VirtualKey, error)
 	Revoke(ctx context.Context, id string) error
+	// Update applies a partial update to the key identified by id.
+	// Fields left nil in the patch are preserved. Returns ErrNotFound
+	// if the key does not exist and ErrRevoked if it has been revoked.
+	Update(ctx context.Context, id string, patch KeyPatch) (*VirtualKey, error)
 }
 
 // Memory is an in-memory Store. Contents are lost on process restart.
@@ -163,6 +209,23 @@ func (m *Memory) Revoke(_ context.Context, id string) error {
 	now := time.Now().UTC()
 	k.RevokedAt = &now
 	return nil
+}
+
+// Update applies a partial update to an active key.
+// Returns ErrNotFound if the key does not exist and ErrRevoked if revoked.
+func (m *Memory) Update(_ context.Context, id string, patch KeyPatch) (*VirtualKey, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k, ok := m.byID[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if k.IsRevoked() {
+		return nil, ErrRevoked
+	}
+	patch.ApplyTo(k)
+	cp := *k
+	return &cp, nil
 }
 
 // GenerateID returns a new public admin identifier, 16 hex chars prefixed with "key_".
