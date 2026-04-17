@@ -22,6 +22,18 @@ const (
 	ConfigPollIntervalMax = 1 * time.Hour
 )
 
+// ExpirySweepInterval bounds: the sweeper runs once per tick to
+// auto-revoke keys whose expires_at has passed. 10s is the floor to
+// keep the per-tick scan cost negligible; 1h is the ceiling so operator
+// misconfiguration ("1d") cannot silently delay audit-trail stamping
+// for a whole day. The default matches the #77 design (60s); operators
+// who want tighter audit drift set REIN_EXPIRY_SWEEP_INTERVAL=10s.
+const (
+	ExpirySweepIntervalMin     = 10 * time.Second
+	ExpirySweepIntervalMax     = 1 * time.Hour
+	ExpirySweepIntervalDefault = 60 * time.Second
+)
+
 // DefaultConfigFilePath is the well-known path Rein probes for an
 // operator config file when REIN_CONFIG_FILE is unset. This matches
 // the nginx / postgres / redis convention of "well-known path with
@@ -45,15 +57,16 @@ const (
 
 // Config holds Rein's runtime settings.
 type Config struct {
-	Port               string
-	AdminToken         string
-	DatabaseURL        string
-	EncryptionKey      string
-	OpenAIBase         string
-	AnthropicBase      string
-	ConfigFile         string        // empty = use only the embedded pricing table
-	ConfigFileSource   string        // one of ConfigSource* constants; set by Load
-	ConfigPollInterval time.Duration // zero = SIGHUP-only reload, no background poll
+	Port                string
+	AdminToken          string
+	DatabaseURL         string
+	EncryptionKey       string
+	OpenAIBase          string
+	AnthropicBase       string
+	ConfigFile          string        // empty = use only the embedded pricing table
+	ConfigFileSource    string        // one of ConfigSource* constants; set by Load
+	ConfigPollInterval  time.Duration // zero = SIGHUP-only reload, no background poll
+	ExpirySweepInterval time.Duration // tick cadence for the expiry auto-revocation sweeper
 }
 
 // Load reads configuration from environment variables.
@@ -107,6 +120,24 @@ func Load() (*Config, error) {
 			)
 		}
 		cfg.ConfigPollInterval = d
+	}
+
+	// REIN_EXPIRY_SWEEP_INTERVAL is optional. Unset means the default
+	// 60s tick. Set values are parsed via time.ParseDuration and bounded
+	// to [ExpirySweepIntervalMin, ExpirySweepIntervalMax].
+	cfg.ExpirySweepInterval = ExpirySweepIntervalDefault
+	if raw := os.Getenv("REIN_EXPIRY_SWEEP_INTERVAL"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("REIN_EXPIRY_SWEEP_INTERVAL: %w", err)
+		}
+		if d < ExpirySweepIntervalMin || d > ExpirySweepIntervalMax {
+			return nil, fmt.Errorf(
+				"REIN_EXPIRY_SWEEP_INTERVAL %s out of range; must be between %s and %s",
+				d, ExpirySweepIntervalMin, ExpirySweepIntervalMax,
+			)
+		}
+		cfg.ExpirySweepInterval = d
 	}
 
 	return cfg, nil

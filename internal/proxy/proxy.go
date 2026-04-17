@@ -178,6 +178,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			api.WriteError(w, http.StatusUnauthorized, CodeKeyRevoked, "virtual key revoked")
 			return
 		}
+		// Belt-and-suspenders: a key whose expires_at has passed must
+		// fail closed on every request even if the sweeper has not
+		// yet stamped revoked_at. The response is deliberately
+		// indistinguishable from manual revocation (same 401, same
+		// code) so clients cannot enumerate which operator keys
+		// expire when. For keys with ExpiresAt == nil this is a single
+		// branch and short-circuits on the hot path.
+		if vkey.IsExpired(time.Now().UTC()) {
+			api.WriteError(w, http.StatusUnauthorized, CodeKeyRevoked, "virtual key revoked")
+			return
+		}
 		if vkey.Upstream != wantUpstream {
 			api.WriteError(w, http.StatusBadRequest, CodeUpstreamMismatch, "rein key upstream does not match request path")
 			return

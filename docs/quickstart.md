@@ -74,8 +74,10 @@ The `token` is returned exactly once. Rein never shows it again. Subsequent
 Copy it straight into your secret manager.
 
 `rps_limit` and `rpm_limit` bound arrival velocity; `max_concurrent` bounds
-work-in-progress. Both default to zero (unlimited). For the full list of
-optional fields and the multi-replica caveat for both brakes, see
+work-in-progress. Both default to zero (unlimited). An optional `expires_at`
+(RFC3339 UTC) auto-revokes the key at the scheduled instant, handy for
+contractors or incident-response break-glass tokens. For the full list of
+optional fields and the multi-replica caveat for the brakes, see
 [admin-api.md](admin-api.md).
 
 ## 3. Point your app at Rein

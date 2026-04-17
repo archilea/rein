@@ -59,6 +59,13 @@ type VirtualKey struct {
 	MaxConcurrent   int // max concurrent in-flight requests; 0 means unlimited
 	CreatedAt       time.Time
 	RevokedAt       *time.Time
+	// ExpiresAt is the optional auto-revocation timestamp. Nil means no
+	// expiry. When set and the instant has passed, the proxy hot path
+	// rejects the key with a revocation-identical 401, and a background
+	// sweeper writes revoked_at == expires_at on the next tick so the
+	// audit trail records automatic revocation distinctly from a manual
+	// POST /admin/v1/keys/{id}/revoke (which stamps revoked_at = now).
+	ExpiresAt *time.Time
 }
 
 // IsRevoked reports whether the key has been revoked.
@@ -66,9 +73,22 @@ func (k *VirtualKey) IsRevoked() bool {
 	return k != nil && k.RevokedAt != nil
 }
 
+// IsExpired reports whether the key carries an expires_at whose instant is
+// no longer in the future. The proxy hot path calls this immediately after
+// IsRevoked so an expired-but-not-yet-swept key still fails closed; the
+// returned condition is indistinguishable from manual revocation on the
+// client side (same 401, same error code) so operators cannot accidentally
+// leak a "your key expired at X" signal to callers.
+func (k *VirtualKey) IsExpired(now time.Time) bool {
+	return k != nil && k.ExpiresAt != nil && !now.Before(*k.ExpiresAt)
+}
+
 // KeyPatch holds the mutable fields for a partial key update.
 // Nil pointers mean "leave unchanged"; non-nil zero values mean
 // "set to zero" (which is "unlimited" for budgets and rate limits).
+// ExpiresAt is tri-state: ExpiresAt=nil AND ClearExpiresAt=false means
+// unchanged; ExpiresAt non-nil sets the new expiry; ClearExpiresAt=true
+// removes the expiry. Callers must not combine the two in one patch.
 type KeyPatch struct {
 	Name            *string
 	DailyBudgetUSD  *float64
@@ -77,6 +97,8 @@ type KeyPatch struct {
 	RPMLimit        *int
 	MaxConcurrent   *int
 	UpstreamBaseURL *string
+	ExpiresAt       *time.Time
+	ClearExpiresAt  bool
 }
 
 // ApplyTo writes non-nil patch fields onto k. Callers are responsible
@@ -103,6 +125,13 @@ func (p KeyPatch) ApplyTo(k *VirtualKey) {
 	if p.UpstreamBaseURL != nil {
 		k.UpstreamBaseURL = *p.UpstreamBaseURL
 	}
+	switch {
+	case p.ClearExpiresAt:
+		k.ExpiresAt = nil
+	case p.ExpiresAt != nil:
+		exp := p.ExpiresAt.UTC()
+		k.ExpiresAt = &exp
+	}
 }
 
 // Store is the persistence contract for virtual keys.
@@ -113,6 +142,15 @@ type Store interface {
 	GetByID(ctx context.Context, id string) (*VirtualKey, error)
 	List(ctx context.Context) ([]*VirtualKey, error)
 	Revoke(ctx context.Context, id string) error
+	// RevokeAt marks a key as revoked with the supplied revoked_at value
+	// rather than time.Now(). The expiry sweeper uses this to stamp
+	// revoked_at == expires_at so the audit trail records automatic
+	// revocation distinctly from a manual Revoke call.
+	RevokeAt(ctx context.Context, id string, at time.Time) error
+	// ListExpiring returns the non-revoked keys whose expires_at is at or
+	// before asOf. Used by the expiry sweeper to enumerate auto-revocation
+	// candidates without scanning the full key table.
+	ListExpiring(ctx context.Context, asOf time.Time) ([]*VirtualKey, error)
 	// Update applies a partial update to the key identified by id.
 	// Fields left nil in the patch are preserved. Returns ErrNotFound
 	// if the key does not exist and ErrRevoked if it has been revoked.
@@ -209,6 +247,44 @@ func (m *Memory) Revoke(_ context.Context, id string) error {
 	now := time.Now().UTC()
 	k.RevokedAt = &now
 	return nil
+}
+
+// RevokeAt marks a key as revoked with an explicit revoked_at timestamp.
+// Idempotent: calling it on an already-revoked key leaves the existing
+// revoked_at intact (manual revocation must not be retroactively masked
+// by a sweeper stamping the same key).
+func (m *Memory) RevokeAt(_ context.Context, id string, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k, ok := m.byID[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if k.RevokedAt != nil {
+		return nil
+	}
+	t := at.UTC()
+	k.RevokedAt = &t
+	return nil
+}
+
+// ListExpiring returns copies of every non-revoked key whose expires_at is
+// at or before asOf.
+func (m *Memory) ListExpiring(_ context.Context, asOf time.Time) ([]*VirtualKey, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []*VirtualKey
+	for _, k := range m.byID {
+		if k.RevokedAt != nil || k.ExpiresAt == nil {
+			continue
+		}
+		if k.ExpiresAt.After(asOf) {
+			continue
+		}
+		cp := *k
+		out = append(out, &cp)
+	}
+	return out, nil
 }
 
 // Update applies a partial update to an active key.

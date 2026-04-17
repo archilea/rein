@@ -370,7 +370,7 @@ Kept deliberately short. Features that would break the size ceiling are not here
 - [x] `0.2` Encryption key rotation tool (`rein-rotate-keys`, offline)
 - [x] `0.3` Structured JSON errors on all proxy endpoints (#75)
 - [x] `0.3` `PATCH /admin/v1/keys/{id}`: update a key's caps without re-minting (#74)
-- [ ] `0.3` Per-key `expires_at` with automatic revocation (#77)
+- [x] `0.3` Per-key `expires_at` with automatic revocation (#77)
 - [ ] `0.3` Per-key model allowlist (#28)
 - [ ] `0.3` Per-key upstream request timeout (#30)
 - [ ] `0.3` Graceful shutdown: drain flag, configurable grace, proxy-side 503, `/readyz` (#76)

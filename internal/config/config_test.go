@@ -27,10 +27,11 @@ func setEnv(t *testing.T, pairs map[string]string) {
 func requireAdminToken(t *testing.T) {
 	t.Helper()
 	t.Setenv("REIN_ADMIN_TOKEN", "test-admin-token")
-	t.Setenv("REIN_ENCRYPTION_KEY", "")       // not required unless sqlite is used
-	t.Setenv("REIN_DB_URL", "memory")         // avoid the sqlite encryption gate
-	t.Setenv("REIN_CONFIG_FILE", "")          // default: unset
-	t.Setenv("REIN_CONFIG_POLL_INTERVAL", "") // default: unset
+	t.Setenv("REIN_ENCRYPTION_KEY", "")        // not required unless sqlite is used
+	t.Setenv("REIN_DB_URL", "memory")          // avoid the sqlite encryption gate
+	t.Setenv("REIN_CONFIG_FILE", "")           // default: unset
+	t.Setenv("REIN_CONFIG_POLL_INTERVAL", "")  // default: unset
+	t.Setenv("REIN_EXPIRY_SWEEP_INTERVAL", "") // default: 60s
 }
 
 func TestLoad_RequiresAdminToken(t *testing.T) {
@@ -295,6 +296,101 @@ func TestLoad_Hybrid_DirectoryAtDefaultPathIsTreatedAsAbsent(t *testing.T) {
 	}
 	if cfg.ConfigFileSource != ConfigSourceEmbedded {
 		t.Errorf("ConfigFileSource: got %q want %q (directory should not count as present)", cfg.ConfigFileSource, ConfigSourceEmbedded)
+	}
+}
+
+func TestLoad_ExpirySweepIntervalDefaults(t *testing.T) {
+	requireAdminToken(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.ExpirySweepInterval != ExpirySweepIntervalDefault {
+		t.Errorf("ExpirySweepInterval: got %v want %v (default)",
+			cfg.ExpirySweepInterval, ExpirySweepIntervalDefault)
+	}
+}
+
+func TestLoad_ExpirySweepIntervalValidDurations(t *testing.T) {
+	cases := []struct {
+		in   string
+		want time.Duration
+	}{
+		{"10s", 10 * time.Second},
+		{"30s", 30 * time.Second},
+		{"5m", 5 * time.Minute},
+		{"1h", 1 * time.Hour},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			requireAdminToken(t)
+			t.Setenv("REIN_EXPIRY_SWEEP_INTERVAL", tc.in)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("unexpected: %v", err)
+			}
+			if cfg.ExpirySweepInterval != tc.want {
+				t.Errorf("got %v want %v", cfg.ExpirySweepInterval, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoad_ExpirySweepIntervalBoundaries(t *testing.T) {
+	cases := []struct {
+		in   string
+		want time.Duration
+	}{
+		{"10s", ExpirySweepIntervalMin},
+		{"1h", ExpirySweepIntervalMax},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			requireAdminToken(t)
+			t.Setenv("REIN_EXPIRY_SWEEP_INTERVAL", tc.in)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("boundary %s should be valid: %v", tc.in, err)
+			}
+			if cfg.ExpirySweepInterval != tc.want {
+				t.Errorf("boundary %s: got %v want %v", tc.in, cfg.ExpirySweepInterval, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoad_ExpirySweepIntervalBelowMinimumIsFatal(t *testing.T) {
+	cases := []string{"9s", "1s", "0s", "1ms"}
+	for _, tc := range cases {
+		t.Run(tc, func(t *testing.T) {
+			requireAdminToken(t)
+			t.Setenv("REIN_EXPIRY_SWEEP_INTERVAL", tc)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "out of range") {
+				t.Errorf("expected out-of-range error for %s, got %v", tc, err)
+			}
+		})
+	}
+}
+
+func TestLoad_ExpirySweepIntervalAboveMaximumIsFatal(t *testing.T) {
+	cases := []string{"1h1s", "2h", "24h"}
+	for _, tc := range cases {
+		t.Run(tc, func(t *testing.T) {
+			requireAdminToken(t)
+			t.Setenv("REIN_EXPIRY_SWEEP_INTERVAL", tc)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "out of range") {
+				t.Errorf("expected out-of-range error for %s, got %v", tc, err)
+			}
+		})
+	}
+}
+
+func TestLoad_ExpirySweepIntervalMalformedIsFatal(t *testing.T) {
+	requireAdminToken(t)
+	t.Setenv("REIN_EXPIRY_SWEEP_INTERVAL", "notaduration")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "REIN_EXPIRY_SWEEP_INTERVAL") {
+		t.Errorf("expected parse error referencing env var name, got %v", err)
 	}
 }
 
