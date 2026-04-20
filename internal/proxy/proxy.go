@@ -234,6 +234,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			defer p.concurrency.Release(vkey.ID, vkey.MaxConcurrent)
 		}
 		r = r.WithContext(context.WithValue(r.Context(), vkeyContextKey{}, vkey))
+		// Per-key upstream timeout. Only wraps the context when the key has
+		// opted in (UpstreamTimeoutSeconds > 0); unlimited keys skip this
+		// branch entirely and pay zero hot-path cost. defer cancel() releases
+		// the timer goroutine on normal completion so the timer does not leak
+		// waiting for the full deadline. The adapter's ErrorHandler translates
+		// context.DeadlineExceeded into 504 on non-streaming responses; the
+		// streaming tee reader handles it on SSE responses (see stream.go).
+		if vkey.UpstreamTimeoutSeconds > 0 {
+			ctx, cancel := context.WithTimeout(r.Context(),
+				time.Duration(vkey.UpstreamTimeoutSeconds)*time.Second)
+			defer cancel()
+			r = r.WithContext(ctx)
+		}
 	}
 
 	switch wantUpstream {

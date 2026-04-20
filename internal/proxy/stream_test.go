@@ -17,7 +17,7 @@ func collectStream(t *testing.T, upstream, raw string) (model string, in, out in
 	var gotModel string
 	var gotIn, gotOut int
 	sm := newStreamMeter(io.NopCloser(strings.NewReader(raw)), upstream,
-		func(m string, i, o int) { gotModel, gotIn, gotOut = m, i, o })
+		func(m string, i, o int) { gotModel, gotIn, gotOut = m, i, o }, nil)
 
 	var sink bytes.Buffer
 	if _, err := io.Copy(&sink, sm); err != nil {
@@ -82,6 +82,7 @@ data: [DONE]
 		io.NopCloser(&chunkedReader{src: []byte(raw), step: 20}),
 		keys.UpstreamOpenAI,
 		func(m string, i, o int) { gotModel, gotIn, gotOut = m, i, o },
+		nil,
 	)
 	var sink bytes.Buffer
 	if _, err := io.Copy(&sink, sm); err != nil {
@@ -104,7 +105,7 @@ func TestStreamMeter_MalformedLineIgnored(t *testing.T) {
 func TestStreamMeter_NoUsageDoesNotFireCallback(t *testing.T) {
 	fired := false
 	sm := newStreamMeter(io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
-		keys.UpstreamOpenAI, func(string, int, int) { fired = true })
+		keys.UpstreamOpenAI, func(string, int, int) { fired = true }, nil)
 	_, _ = io.Copy(io.Discard, sm)
 	_ = sm.Close()
 	if fired {

@@ -81,10 +81,12 @@ budgets on the way back.
 ### Mint a new key
 
 `name` and `upstream_key` are required. `upstream` must be `openai` or
-`anthropic`. Budgets and rate limits are optional and default to zero, which is
-treated as unlimited. `expires_at` is optional; omit it for a key with no
-expiry, see [Time-bounded keys](#time-bounded-keys) for the auto-revocation
-semantics.
+`anthropic`. Budgets, rate limits, and `upstream_timeout_seconds` are optional
+and default to zero, which is treated as unlimited. `expires_at` is optional;
+omit it for a key with no expiry, see [Time-bounded keys](#time-bounded-keys)
+for the auto-revocation semantics. See
+[Upstream request timeout](#upstream-request-timeout) for the per-request
+duration ceiling.
 
 ```bash
 curl -X POST "$REIN_URL/admin/v1/keys" \
@@ -98,7 +100,8 @@ curl -X POST "$REIN_URL/admin/v1/keys" \
     "month_budget_usd": 2000,
     "rps_limit": 10,
     "rpm_limit": 300,
-    "max_concurrent": 50
+    "max_concurrent": 50,
+    "upstream_timeout_seconds": 120
   }'
 ```
 
@@ -115,6 +118,7 @@ Response:
   "rps_limit": 10,
   "rpm_limit": 300,
   "max_concurrent": 50,
+  "upstream_timeout_seconds": 120,
   "created_at": "2026-04-10T12:00:00Z"
 }
 ```
@@ -169,7 +173,8 @@ are changed; absent fields are preserved. Zero values explicitly set the cap
 to unlimited (same semantics as create).
 
 Mutable fields: `name`, `daily_budget_usd`, `month_budget_usd`, `rps_limit`,
-`rpm_limit`, `max_concurrent`, `upstream_base_url`, `expires_at`.
+`rpm_limit`, `max_concurrent`, `upstream_timeout_seconds`, `upstream_base_url`,
+`expires_at`.
 
 `expires_at` is tri-state on PATCH: omit the field to leave it unchanged, pass
 an RFC3339 UTC timestamp to set or replace the expiry, or pass the explicit
@@ -429,6 +434,92 @@ A globally-synchronized variant (a distributed semaphore via Redis, or
 similar) is out of scope for 0.2 but slots in behind the same `Store`
 interface without rewriting the hot path.
 
+## Upstream request timeout
+
+Each virtual key can carry an optional `upstream_timeout_seconds` ceiling on
+the wall-clock duration of any one upstream call. The default is zero, which
+means unlimited. When set, Rein wraps the request context with
+`context.WithTimeout(vkey.UpstreamTimeoutSeconds * time.Second)` before
+dispatching to the provider adapter. If the deadline fires before the
+upstream finishes:
+
+- **Non-streaming JSON responses** return `504 Gateway Timeout` with
+  `Retry-After: 1` and the structured `upstream_timeout` code. The message
+  names the configured ceiling so operators can correlate 504s with their
+  key config.
+- **Streaming (SSE) responses** cannot retroactively change their `200 OK`
+  status; Rein writes a short SSE comment line
+  (`: rein upstream timeout after N seconds\n\n`) and closes the connection
+  cleanly. Any usage tokens parsed before the cancel are still recorded
+  against the key budget (the partial-metering invariant from
+  `docs/architecture.md`).
+
+This is the `proxy_read_timeout` analog for LLM traffic, sized for
+reasoning-model tail latency. A 30-second reasoning call terminated at
+second 18 because the pod rolled is the failure mode this is designed to
+prevent, as is the opposite case: a hanging call that silently burns
+upstream cost for minutes while no usage chunk ever arrives.
+
+### Validation
+
+- `upstream_timeout_seconds` must be an integer in `[0, 3600]`.
+- `0` means unlimited.
+- Values greater than `3600` (one hour) are rejected with `400 Bad Request`
+  to protect operators from typos such as `86400` (a full day in seconds).
+  One hour covers every realistic reasoning-model or extended-thinking
+  request.
+- Sub-second precision is not supported in this release; revisit if
+  operators ask for `"60s"` / `"5m"` duration strings.
+
+### Setting a timeout on create
+
+```bash
+curl -X POST "$REIN_URL/admin/v1/keys" \
+  -H "Authorization: Bearer $REIN_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "reasoning-tier",
+    "upstream": "openai",
+    "upstream_key": "sk-your-real-openai-key",
+    "upstream_timeout_seconds": 120
+  }'
+```
+
+### Changing a timeout after the fact
+
+```bash
+# Lower the ceiling for a key that has been hanging.
+curl -X PATCH "$REIN_URL/admin/v1/keys/key_..." \
+  -H "Authorization: Bearer $REIN_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"upstream_timeout_seconds": 45}'
+
+# Remove the ceiling (back to unlimited).
+curl -X PATCH "$REIN_URL/admin/v1/keys/key_..." \
+  -H "Authorization: Bearer $REIN_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"upstream_timeout_seconds": 0}'
+```
+
+### Interaction with other brakes
+
+- **Dial timeout** (10 s, global) still fires independently on unreachable
+  upstreams; a dial failure returns `502 Bad Gateway`, not `504`.
+- **Budget caps** only fire after usage is recorded. A hanging call never
+  reaches Record; the timeout is what bounds its worst case.
+- **Rate limit** bounds arrival velocity, not request duration.
+- **Concurrency cap** bounds in-flight slots; timeout releases hung slots
+  so the cap stays useful under upstream flakiness.
+- **max_output_tokens** (future) bounds worst-case cost per call; timeout
+  bounds worst-case duration. Operators typically want both.
+
+### Multi-replica note
+
+`upstream_timeout_seconds` is a per-key field stored in the keystore and a
+per-process timer at request time. No distributed state is required. In a
+multi-replica deployment every replica enforces the same ceiling for the
+same key without coordination.
+
 ## Proxy error response format
 
 Every proxy-side error (`/v1/*` requests) returns a structured JSON envelope
@@ -460,10 +551,12 @@ Headers (`Retry-After`, status codes) are unchanged from prior releases.
 | 402 | `budget_exceeded` | Daily or monthly USD cap already reached |
 | 429 | `rate_limited` | RPS or RPM sliding window cap exceeded |
 | 429 | `concurrency_exceeded` | Per-key in-flight cap reached |
+| 504 | `upstream_timeout` | Per-key `upstream_timeout_seconds` exceeded (non-streaming) |
 | 500 | `internal_error` | Unexpected server-side failure |
 
-`rate_limited` and `concurrency_exceeded` responses include a `Retry-After`
-header. `kill_switch_engaged` includes `Retry-After: 60`.
+`rate_limited`, `concurrency_exceeded`, and `upstream_timeout` responses
+include a `Retry-After` header. `kill_switch_engaged` includes
+`Retry-After: 60`.
 
 ## Health and version
 

@@ -169,12 +169,14 @@ func (a *Anthropic) wrapStream(resp *http.Response) {
 		return
 	}
 	keyID := vk.ID
+	// Pass the request ctx so a per-key upstream timeout (#30) is turned
+	// into a clean SSE close + partial-usage Record rather than a 500.
 	resp.Body = newStreamMeter(resp.Body, keys.UpstreamAnthropic,
 		func(model string, in, out int) {
 			slog.Info("anthropic stream usage",
 				"model", model, "input_tokens", in, "output_tokens", out)
 			a.recordSpend(context.Background(), keyID, model, in, out)
-		})
+		}, resp.Request.Context())
 }
 
 func (a *Anthropic) recordSpend(ctx context.Context, keyID, model string, inputTokens, outputTokens int) {
@@ -195,8 +197,19 @@ func (a *Anthropic) recordSpend(ctx context.Context, keyID, model string, inputT
 	}
 }
 
-// errorHandler returns 502 with a logged reason when the upstream dial fails.
+// errorHandler returns 504 if the per-key upstream timeout fired, otherwise
+// 502 with a logged reason when the upstream dial or copy fails. On a
+// streaming response the 200 status has already been flushed before we
+// reach here, so the 504 branch is effectively non-streaming-only.
 func (a *Anthropic) errorHandler(w http.ResponseWriter, r *http.Request, err error) {
+	if isUpstreamTimeout(err) {
+		slog.Warn("anthropic upstream timeout",
+			"path", r.URL.Path,
+			"err", err,
+		)
+		writeUpstreamTimeout(w, r)
+		return
+	}
 	slog.Error("anthropic proxy error",
 		"path", r.URL.Path,
 		"err", err,
