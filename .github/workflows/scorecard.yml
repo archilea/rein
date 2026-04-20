@@ -1,11 +1,17 @@
 name: Scorecard supply-chain security
 
+# Temporarily gated to manual dispatch only while the repo is private.
+# OpenSSF Scorecard only supports public repositories (it queries public
+# metadata and uploads SARIF via security-events, both of which require
+# public-repo access). Restore the branch_protection_rule/schedule/push
+# triggers below once the repo is public again.
 on:
-  branch_protection_rule:
-  schedule:
-    - cron: "0 4 * * 4" # weekly on Thursday 04:00 UTC
-  push:
-    branches: [main]
+  workflow_dispatch:
+  # branch_protection_rule:
+  # schedule:
+  #   - cron: "0 4 * * 4" # weekly on Thursday 04:00 UTC
+  # push:
+  #   branches: [main]
 
 permissions: read-all
 

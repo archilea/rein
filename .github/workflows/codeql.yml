@@ -1,12 +1,16 @@
 name: CodeQL
 
+# Temporarily gated to manual dispatch only while the repo is private.
+# CodeQL on private repos requires GitHub Advanced Security. Restore the
+# push/pull_request/schedule triggers below once the repo is public again.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-  schedule:
-    - cron: "0 4 * * 1" # weekly on Monday 04:00 UTC
+  workflow_dispatch:
+  # push:
+  #   branches: [main]
+  # pull_request:
+  #   branches: [main]
+  # schedule:
+  #   - cron: "0 4 * * 1" # weekly on Monday 04:00 UTC
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
