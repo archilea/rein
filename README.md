@@ -36,12 +36,13 @@ Cost and safety controls:
 8. **Per-key upstream request timeout** (`upstream_timeout_seconds`, `[0, 3600]`) bounds the wall-clock duration of any one upstream call. The `proxy_read_timeout` analog for LLM traffic, sized for reasoning-model tail latency. Non-streaming responses that exceed the ceiling return `504 Gateway Timeout` with `Retry-After: 1`; streaming responses close the SSE stream cleanly with a final comment line and record whatever usage was parsed before the cancel. Default `0` means unlimited and pays zero hot-path cost.
 9. **Spend metering** from both JSON and SSE streaming responses, priced against an embedded pricing table verified against OpenAI and Anthropic vendor docs. Dated model snapshots (`claude-opus-4-5-20251101`, `gpt-4o-2024-08-06`) resolve to their base entries automatically.
 10. **Streaming usage auto-inject.** For OpenAI chat completions, Rein injects `stream_options.include_usage: true` into the outbound body so streaming clients cannot silently bypass budget enforcement. An explicit client opt-out is respected and logged.
+11. **Graceful drain for rolling deploys.** `SIGTERM` / `SIGINT` flips a drain flag and gives in-flight LLM calls up to `REIN_SHUTDOWN_GRACE` (default `30s`, bounded to `[1s, 5m]`) to finish before force-closing. New `/v1/*` requests during drain receive `503 Service Unavailable` with `Retry-After: 5` and the structured `draining` code so clients retry on another replica. The liveness-vs-readiness split lets Kubernetes remove the pod from the Service pool (`/readyz` flips) without restarting it (`/healthz` stays green), protecting the in-flight work the drain window is there to finish. A second signal within the window force-closes immediately for operators who want to cut a bad deploy short.
 
 Operational foundation:
 
-11. **Durable SQLite keystore + spend meter** via `modernc.org/sqlite` (pure Go, no CGO). WAL mode enabled. Spend totals survive process restart, OOM, and `kill -9`. Single static binary deploys anywhere.
-12. **Encryption at rest** for the upstream key column using AES-256-GCM. Rein refuses to start without `REIN_ENCRYPTION_KEY`, so plaintext credentials cannot land on disk by accident. Ciphertext carries a `v1:` tag so future algorithm rotations do not require a schema migration.
-13. **Offline encryption key rotation** via the `rein-rotate-keys` CLI. Rotates the AES-256-GCM key that wraps the upstream credential column, idempotent and atomic. Operator runbook in `docs/runbooks/key-rotation.md`.
+12. **Durable SQLite keystore + spend meter** via `modernc.org/sqlite` (pure Go, no CGO). WAL mode enabled. Spend totals survive process restart, OOM, and `kill -9`. Single static binary deploys anywhere.
+13. **Encryption at rest** for the upstream key column using AES-256-GCM. Rein refuses to start without `REIN_ENCRYPTION_KEY`, so plaintext credentials cannot land on disk by accident. Ciphertext carries a `v1:` tag so future algorithm rotations do not require a schema migration.
+14. **Offline encryption key rotation** via the `rein-rotate-keys` CLI. Rotates the AES-256-GCM key that wraps the upstream credential column, idempotent and atomic. Operator runbook in `docs/runbooks/key-rotation.md`.
 
 ## Who this is for
 
@@ -377,7 +378,7 @@ Kept deliberately short. Features that would break the size ceiling are not here
 - [x] `0.3` Per-key `expires_at` with automatic revocation (#77)
 - [ ] `0.3` Per-key model allowlist (#28)
 - [x] `0.3` Per-key upstream request timeout (#30)
-- [ ] `0.3` Graceful shutdown: drain flag, configurable grace, proxy-side 503, `/readyz` (#76)
+- [x] `0.3` Graceful shutdown: drain flag, configurable grace, proxy-side 503, `/readyz` (#76)
 
 ## Contributing
 

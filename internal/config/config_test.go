@@ -32,6 +32,7 @@ func requireAdminToken(t *testing.T) {
 	t.Setenv("REIN_CONFIG_FILE", "")           // default: unset
 	t.Setenv("REIN_CONFIG_POLL_INTERVAL", "")  // default: unset
 	t.Setenv("REIN_EXPIRY_SWEEP_INTERVAL", "") // default: 60s
+	t.Setenv("REIN_SHUTDOWN_GRACE", "")        // default: 30s
 }
 
 func TestLoad_RequiresAdminToken(t *testing.T) {
@@ -390,6 +391,104 @@ func TestLoad_ExpirySweepIntervalMalformedIsFatal(t *testing.T) {
 	t.Setenv("REIN_EXPIRY_SWEEP_INTERVAL", "notaduration")
 	_, err := Load()
 	if err == nil || !strings.Contains(err.Error(), "REIN_EXPIRY_SWEEP_INTERVAL") {
+		t.Errorf("expected parse error referencing env var name, got %v", err)
+	}
+}
+
+// --- REIN_SHUTDOWN_GRACE (#76) ---
+
+func TestLoad_ShutdownGraceDefaults(t *testing.T) {
+	requireAdminToken(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.ShutdownGrace != ShutdownGraceDefault {
+		t.Errorf("ShutdownGrace: got %v want %v (default)",
+			cfg.ShutdownGrace, ShutdownGraceDefault)
+	}
+}
+
+func TestLoad_ShutdownGraceValidDurations(t *testing.T) {
+	cases := []struct {
+		in   string
+		want time.Duration
+	}{
+		{"1s", 1 * time.Second},
+		{"5s", 5 * time.Second},
+		{"30s", 30 * time.Second},
+		{"1m", 1 * time.Minute},
+		{"5m", 5 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			requireAdminToken(t)
+			t.Setenv("REIN_SHUTDOWN_GRACE", tc.in)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("unexpected: %v", err)
+			}
+			if cfg.ShutdownGrace != tc.want {
+				t.Errorf("got %v want %v", cfg.ShutdownGrace, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoad_ShutdownGraceBoundaries(t *testing.T) {
+	cases := []struct {
+		in   string
+		want time.Duration
+	}{
+		{"1s", ShutdownGraceMin},
+		{"5m", ShutdownGraceMax},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			requireAdminToken(t)
+			t.Setenv("REIN_SHUTDOWN_GRACE", tc.in)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("boundary %s should be valid: %v", tc.in, err)
+			}
+			if cfg.ShutdownGrace != tc.want {
+				t.Errorf("boundary %s: got %v want %v", tc.in, cfg.ShutdownGrace, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoad_ShutdownGraceBelowMinimumIsFatal(t *testing.T) {
+	cases := []string{"0s", "500ms", "999ms"}
+	for _, tc := range cases {
+		t.Run(tc, func(t *testing.T) {
+			requireAdminToken(t)
+			t.Setenv("REIN_SHUTDOWN_GRACE", tc)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "out of range") {
+				t.Errorf("expected out-of-range error for %s, got %v", tc, err)
+			}
+		})
+	}
+}
+
+func TestLoad_ShutdownGraceAboveMaximumIsFatal(t *testing.T) {
+	cases := []string{"5m1s", "10m", "1h", "24h"}
+	for _, tc := range cases {
+		t.Run(tc, func(t *testing.T) {
+			requireAdminToken(t)
+			t.Setenv("REIN_SHUTDOWN_GRACE", tc)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "out of range") {
+				t.Errorf("expected out-of-range error for %s, got %v", tc, err)
+			}
+		})
+	}
+}
+
+func TestLoad_ShutdownGraceMalformedIsFatal(t *testing.T) {
+	requireAdminToken(t)
+	t.Setenv("REIN_SHUTDOWN_GRACE", "notaduration")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "REIN_SHUTDOWN_GRACE") {
 		t.Errorf("expected parse error referencing env var name, got %v", err)
 	}
 }

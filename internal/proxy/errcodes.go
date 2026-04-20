@@ -6,6 +6,14 @@ const (
 	// CodeKillSwitchEngaged is returned (503) when the global kill-switch is frozen.
 	CodeKillSwitchEngaged = "kill_switch_engaged"
 
+	// CodeDraining is returned (503) when the proxy has entered shutdown
+	// drain mode. Distinct from the kill-switch because drain is a planned
+	// rolling-deploy signal ("retry against a sibling replica") while the
+	// kill-switch is an incident-response hard stop ("everybody fails
+	// now"). Carries Retry-After: 5 so clients back off briefly before
+	// retrying against the load balancer's next replica.
+	CodeDraining = "draining"
+
 	// CodeMissingKey is returned (401) when no Authorization: Bearer header is present.
 	CodeMissingKey = "missing_key"
 

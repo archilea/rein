@@ -88,6 +88,27 @@ There is no Postgres driver in 0.1 and no plan to add one in 0.2. The design tar
 
 All datetimes are persisted and compared in UTC.
 
+## Shutdown
+
+Rolling deploys are the common case. The shutdown lifecycle is built around the Kubernetes pod lifecycle and the fact that LLM calls can legitimately take tens of seconds.
+
+**Signal flow on the first SIGTERM / SIGINT:**
+
+1. `cmd/rein` flips `proxy.Proxy.draining` to true via `SetDraining`. A single atomic store; the proxy hot path reads the flag before the kill-switch (so drain 503s are even cheaper than frozen 503s) and short-circuits new `/v1/*` requests with `503 Service Unavailable`, `Retry-After: 5`, and the structured envelope `{"error":{"code":"draining", ...}}`. Clients see a clean, machine-readable signal and retry against another replica via the operator's load balancer.
+2. The background contexts that drive the expiry sweeper and the config-reload poller are cancelled so those goroutines exit promptly and do not block shutdown.
+3. `http.Server.Shutdown(ctx)` runs against a context bounded by `REIN_SHUTDOWN_GRACE` (default `30s`, bounded to `[1s, 5m]`). Shutdown stops accepting new connections, lets idle keep-alive connections close on schedule, and lets in-flight requests run to completion. In-flight streaming SSE responses keep flowing until the upstream finishes or the client disconnects.
+4. If the grace window expires with requests still in flight, `Shutdown` returns `context.DeadlineExceeded` and net/http force-closes the open connections. Rein logs a WARN line with the count of connections still mid-request at the moment the grace ran out, so operators tuning `REIN_SHUTDOWN_GRACE` can see whether their value is too short for the upstream tail latency they actually observe.
+5. The spend meter's SQLite handle is closed last. Any background-context `meter.Record` call that was already in flight completes first (Record uses `context.Background()`, so it does not observe the drain signal); the durability contract on already-running Record calls is unchanged.
+
+**Double-signal escalation.** A second `SIGTERM` / `SIGINT` during the grace window is an operator saying "cut it short now": `cmd/rein` calls `http.Server.Close`, which force-closes every connection immediately and returns from the shutdown path without waiting for the grace deadline. Useful for cancelling a bad deploy that is going to be rolled back regardless.
+
+**Liveness vs readiness.** Kubernetes deployments should wire two probes to two different Rein endpoints:
+
+- `/healthz` is **liveness**. It is strictly "is the process up?" — a liveness-fail tells Kubernetes to restart the pod. `/healthz` never flips during drain: if it did, Kubernetes would restart a pod that is mid-drain, which would kill the very in-flight requests the drain window exists to protect.
+- `/readyz` is **readiness**. It reads the same `draining` atomic the proxy hot path reads: `200 {"status":"ready"}` normally, `503 {"status":"draining"}` the instant `SetDraining(true)` runs. A readiness-fail tells the Service's endpoint controller to remove the pod from the load balancer's pool, so no new traffic arrives — but the pod is NOT restarted, leaving the drain window intact for in-flight work. `/readyz` does not report keystore health, upstream reachability, or anything broader; "is this replica in the pool?" is the entire contract.
+
+The admin port is not split from the proxy in 0.3: both surfaces share one `http.Server` and therefore drain together. An operator who still wants to hit `POST /admin/v1/killswitch` during the grace window can, because the admin handlers keep serving until `Shutdown` finishes draining everything.
+
 ## What Rein does not do
 
 - **Traces, spans, or prompt-level observability.** Use Langfuse, Helicone, or Braintrust alongside.
