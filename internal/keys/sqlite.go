@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS virtual_keys (
 	rpm_limit          INTEGER NOT NULL DEFAULT 0,
 	max_concurrent     INTEGER NOT NULL DEFAULT 0,
 	created_at         TEXT NOT NULL,
-	revoked_at         TEXT
+	revoked_at         TEXT,
+	expires_at         TEXT
 );`
 
 // NewSQLite opens (or creates) a SQLite database at path and applies the schema.
@@ -94,6 +95,7 @@ func applySQLiteMigrations(db *sql.DB) error {
 		{"rps_limit", `ALTER TABLE virtual_keys ADD COLUMN rps_limit INTEGER NOT NULL DEFAULT 0`},
 		{"rpm_limit", `ALTER TABLE virtual_keys ADD COLUMN rpm_limit INTEGER NOT NULL DEFAULT 0`},
 		{"max_concurrent", `ALTER TABLE virtual_keys ADD COLUMN max_concurrent INTEGER NOT NULL DEFAULT 0`},
+		{"expires_at", `ALTER TABLE virtual_keys ADD COLUMN expires_at TEXT`},
 	} {
 		has, err := sqliteColumnExists(db, "virtual_keys", col.name)
 		if err != nil {
@@ -180,13 +182,18 @@ func (s *SQLite) Create(ctx context.Context, k *VirtualKey) error {
 	if err != nil {
 		return fmt.Errorf("encrypt upstream key: %w", err)
 	}
+	var expiresAtCol any
+	if k.ExpiresAt != nil {
+		expiresAtCol = k.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO virtual_keys (id, token, name, upstream, upstream_key, daily_budget_usd, month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO virtual_keys (id, token, name, upstream, upstream_key, daily_budget_usd, month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent, created_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		k.ID, k.Token, k.Name, k.Upstream, encUpstream,
 		k.DailyBudgetUSD, k.MonthBudgetUSD, k.UpstreamBaseURL,
 		k.RPSLimit, k.RPMLimit, k.MaxConcurrent,
-		k.CreatedAt.UTC().Format(time.RFC3339Nano))
+		k.CreatedAt.UTC().Format(time.RFC3339Nano),
+		expiresAtCol)
 	if err != nil {
 		return fmt.Errorf("insert virtual key: %w", err)
 	}
@@ -211,11 +218,11 @@ func (s *SQLite) queryOne(ctx context.Context, column, value string) (*VirtualKe
 	switch column {
 	case "id":
 		q = `SELECT id, token, name, upstream, upstream_key, daily_budget_usd,
-			month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent, created_at, revoked_at
+			month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent, created_at, revoked_at, expires_at
 			FROM virtual_keys WHERE id = ?`
 	case "token":
 		q = `SELECT id, token, name, upstream, upstream_key, daily_budget_usd,
-			month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent, created_at, revoked_at
+			month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent, created_at, revoked_at, expires_at
 			FROM virtual_keys WHERE token = ?`
 	default:
 		return nil, fmt.Errorf("queryOne: unsupported lookup column %q", column)
@@ -228,7 +235,7 @@ func (s *SQLite) queryOne(ctx context.Context, column, value string) (*VirtualKe
 func (s *SQLite) List(ctx context.Context) ([]*VirtualKey, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, token, name, upstream, upstream_key, daily_budget_usd,
-		       month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent, created_at, revoked_at
+		       month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent, created_at, revoked_at, expires_at
 		FROM virtual_keys ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("query keys: %w", err)
@@ -283,13 +290,19 @@ func (s *SQLite) Update(ctx context.Context, id string, patch KeyPatch) (*Virtua
 
 	patch.ApplyTo(current)
 
+	var expiresAtCol any
+	if current.ExpiresAt != nil {
+		expiresAtCol = current.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE virtual_keys SET
 			name = ?, daily_budget_usd = ?, month_budget_usd = ?,
-			upstream_base_url = ?, rps_limit = ?, rpm_limit = ?, max_concurrent = ?
+			upstream_base_url = ?, rps_limit = ?, rpm_limit = ?, max_concurrent = ?,
+			expires_at = ?
 		WHERE id = ? AND revoked_at IS NULL`,
 		current.Name, current.DailyBudgetUSD, current.MonthBudgetUSD,
 		current.UpstreamBaseURL, current.RPSLimit, current.RPMLimit, current.MaxConcurrent,
+		expiresAtCol,
 		id)
 	if err != nil {
 		return nil, fmt.Errorf("update virtual key: %w", err)
@@ -305,6 +318,57 @@ func (s *SQLite) Update(ctx context.Context, id string, patch KeyPatch) (*Virtua
 	return current, nil
 }
 
+// RevokeAt marks a key as revoked with the supplied revoked_at timestamp.
+// Used by the expiry sweeper to stamp revoked_at == expires_at so the
+// audit trail distinguishes automatic from manual revocation. Idempotent
+// against an already-revoked row: the existing revoked_at is preserved
+// (manual revocation must not be overwritten by a later sweep).
+func (s *SQLite) RevokeAt(ctx context.Context, id string, at time.Time) error {
+	stamp := at.UTC().Format(time.RFC3339Nano)
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE virtual_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, stamp, id)
+	if err != nil {
+		return fmt.Errorf("revoke_at key: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("revoke_at rows affected: %w", err)
+	}
+	if n == 0 {
+		if _, err := s.GetByID(ctx, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ListExpiring returns non-revoked keys whose expires_at is at or before asOf.
+func (s *SQLite) ListExpiring(ctx context.Context, asOf time.Time) ([]*VirtualKey, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, token, name, upstream, upstream_key, daily_budget_usd,
+		       month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent, created_at, revoked_at, expires_at
+		FROM virtual_keys
+		WHERE expires_at IS NOT NULL AND expires_at <= ? AND revoked_at IS NULL
+		ORDER BY expires_at ASC`,
+		asOf.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, fmt.Errorf("query expiring keys: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []*VirtualKey
+	for rows.Next() {
+		k, err := s.scanKey(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate expiring keys: %w", err)
+	}
+	return out, nil
+}
+
 // scanKey reads a single virtual_keys row via the supplied Scan function
 // (either *sql.Row.Scan or *sql.Rows.Scan) and decrypts the upstream_key column.
 func (s *SQLite) scanKey(scan func(dest ...any) error) (*VirtualKey, error) {
@@ -313,11 +377,12 @@ func (s *SQLite) scanKey(scan func(dest ...any) error) (*VirtualKey, error) {
 		encUpstream string
 		createdAt   string
 		revokedAt   sql.NullString
+		expiresAt   sql.NullString
 	)
 	err := scan(&k.ID, &k.Token, &k.Name, &k.Upstream, &encUpstream,
 		&k.DailyBudgetUSD, &k.MonthBudgetUSD, &k.UpstreamBaseURL,
 		&k.RPSLimit, &k.RPMLimit, &k.MaxConcurrent,
-		&createdAt, &revokedAt)
+		&createdAt, &revokedAt, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -341,6 +406,14 @@ func (s *SQLite) scanKey(scan func(dest ...any) error) (*VirtualKey, error) {
 		}
 		rt = rt.UTC()
 		k.RevokedAt = &rt
+	}
+	if expiresAt.Valid {
+		et, err := time.Parse(time.RFC3339Nano, expiresAt.String)
+		if err != nil {
+			return nil, fmt.Errorf("parse expires_at: %w", err)
+		}
+		et = et.UTC()
+		k.ExpiresAt = &et
 	}
 	return &k, nil
 }

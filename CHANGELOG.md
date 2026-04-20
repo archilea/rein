@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-key `expires_at` with automatic revocation** (#77). Virtual
+  keys gain an optional RFC3339 UTC `expires_at` field. Admin API
+  accepts it on create and on `PATCH /admin/v1/keys/{id}` (explicit
+  `null` clears the expiry; past or malformed timestamps are rejected
+  with stable `{expires_in_past, invalid_expires_at}` codes in the
+  standard error envelope). Clients using an expired key receive the
+  exact same `401 Unauthorized` with `key_revoked` as a manually
+  revoked key, so operator expiry schedules never leak to callers. The
+  proxy hot path performs one nil check plus one time comparison after
+  the existing `IsRevoked` gate; keys without `expires_at` pay zero
+  cost and the end-to-end benchmark delta against the prior hot path
+  is within noise. A background sweeper, configurable via
+  `REIN_EXPIRY_SWEEP_INTERVAL` (default `60s`, bounded to `[10s, 1h]`),
+  enumerates expired-but-unrevoked rows once per tick and stamps
+  `revoked_at = expires_at` so the audit trail distinguishes
+  automatic from manual revocation. The sweeper cancels on process
+  shutdown and never blocks graceful drain. SQLite keystore gains an
+  additive `expires_at` column with a forward-compatible, idempotent
+  migration. See `docs/admin-api.md` "Time-bounded keys" for operator
+  recipes (contractor access, break-glass tokens, temporary elevated
+  caps).
+
 - **Update a key's caps without re-minting** (#74). New
   `PATCH /admin/v1/keys/{id}` endpoint lets operators change a virtual
   key's `name`, `daily_budget_usd`, `month_budget_usd`, `rps_limit`,

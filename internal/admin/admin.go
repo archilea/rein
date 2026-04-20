@@ -28,6 +28,21 @@ import (
 // upstream_key, created_at, revoked_at).
 const immutableFieldError = "immutable_field"
 
+// Structured error codes for the expires_at field. Separate codes let
+// machine clients distinguish "your RFC3339 string did not parse" from
+// "your RFC3339 string was in the past"; both still return 400.
+const (
+	errCodeInvalidExpiresAt = "invalid_expires_at"
+	errCodeExpiresInPast    = "expires_in_past"
+)
+
+// expiresInFutureSkew is the minimum delta between now and the supplied
+// expires_at for a create/update to be accepted. Matches the #77 spec:
+// "more than 1 second from now". Rejecting sub-second deltas keeps the
+// sweeper from racing a key that was already practically expired at
+// creation time.
+const expiresInFutureSkew = 1 * time.Second
+
 // Server exposes Rein's admin endpoints.
 type Server struct {
 	token      string
@@ -111,6 +126,7 @@ type keyView struct {
 	UpstreamBaseURL string     `json:"upstream_base_url,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
 	RevokedAt       *time.Time `json:"revoked_at,omitempty"`
+	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
 }
 
 func viewOf(k *keys.VirtualKey) keyView {
@@ -126,7 +142,45 @@ func viewOf(k *keys.VirtualKey) keyView {
 		UpstreamBaseURL: k.UpstreamBaseURL,
 		CreatedAt:       k.CreatedAt,
 		RevokedAt:       k.RevokedAt,
+		ExpiresAt:       k.ExpiresAt,
 	}
+}
+
+// messageForExpiresAtCode maps the structured error code for an
+// expires_at validation failure to a stable human message. Keeping the
+// mapping small and centralized prevents the messages from drifting
+// between create and PATCH.
+func messageForExpiresAtCode(code string) string {
+	switch code {
+	case errCodeExpiresInPast:
+		return "expires_at must be in the future"
+	case errCodeInvalidExpiresAt:
+		return "expires_at must be an RFC3339 UTC timestamp"
+	default:
+		return "invalid expires_at"
+	}
+}
+
+// parseExpiresAt parses an expires_at string under the same RFC3339
+// contract as CreatedAt and RevokedAt: RFC3339 or RFC3339Nano, UTC
+// preferred but any offset is converted. The future-skew check uses the
+// caller-supplied `now` so tests can exercise the boundary deterministically.
+// Returns (utc time, nil) on success; (_, api code) where api code is one
+// of errCodeInvalidExpiresAt / errCodeExpiresInPast on failure.
+func parseExpiresAt(raw string, now time.Time) (time.Time, string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, errCodeInvalidExpiresAt
+	}
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}, errCodeInvalidExpiresAt
+	}
+	t = t.UTC()
+	if !t.After(now.Add(expiresInFutureSkew)) {
+		return time.Time{}, errCodeExpiresInPast
+	}
+	return t, ""
 }
 
 // createKeyResponse includes the secret token. This is the ONE time the caller
@@ -147,6 +201,7 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		RPMLimit        int     `json:"rpm_limit"`
 		MaxConcurrent   int     `json:"max_concurrent"`
 		UpstreamBaseURL string  `json:"upstream_base_url"`
+		ExpiresAt       string  `json:"expires_at"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid json body", http.StatusBadRequest)
@@ -206,6 +261,18 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		canonicalBaseURL = canonical
 	}
 
+	// Optional auto-revocation expiry. Omitted means no expiry. Present
+	// and malformed or in the past returns a structured envelope.
+	var expiresAt *time.Time
+	if strings.TrimSpace(body.ExpiresAt) != "" {
+		parsed, code := parseExpiresAt(body.ExpiresAt, time.Now().UTC())
+		if code != "" {
+			api.WriteError(w, http.StatusBadRequest, code, messageForExpiresAtCode(code))
+			return
+		}
+		expiresAt = &parsed
+	}
+
 	id, err := keys.GenerateID()
 	if err != nil {
 		slog.Error("generate key id", "err", err)
@@ -232,6 +299,7 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		MaxConcurrent:   body.MaxConcurrent,
 		UpstreamBaseURL: canonicalBaseURL,
 		CreatedAt:       time.Now().UTC(),
+		ExpiresAt:       expiresAt,
 	}
 	if err := s.keys.Create(r.Context(), vk); err != nil {
 		slog.Error("create virtual key", "err", err)
@@ -305,6 +373,17 @@ func (s *Server) handleUpdateKey(w http.ResponseWriter, r *http.Request) {
 		RPMLimit        *int     `json:"rpm_limit,omitempty"`
 		MaxConcurrent   *int     `json:"max_concurrent,omitempty"`
 		UpstreamBaseURL *string  `json:"upstream_base_url,omitempty"`
+
+		// ExpiresAt is tri-state. Non-pointer json.RawMessage is used
+		// deliberately: *json.RawMessage collapses "absent" and "null"
+		// to the same nil pointer, so we cannot distinguish the two
+		// meanings. A bare json.RawMessage leaves the slice empty when
+		// the field is absent and stores []byte("null") when the
+		// client sends an explicit null.
+		//   absent field    -> leave unchanged (len == 0)
+		//   explicit null   -> clear (bytes == "null")
+		//   RFC3339 string  -> set
+		ExpiresAt json.RawMessage `json:"expires_at,omitempty"`
 
 		// Immutable field probes. Non-nil means the client attempted to
 		// change an immutable field, which is rejected with 400.
@@ -393,6 +472,35 @@ func (s *Server) handleUpdateKey(w http.ResponseWriter, r *http.Request) {
 		canonicalBaseURL = &raw
 	}
 
+	// Tri-state expires_at: null clears, RFC3339 string sets, absent leaves
+	// the field alone.
+	var expiresAtPtr *time.Time
+	clearExpiresAt := false
+	if len(body.ExpiresAt) > 0 {
+		raw := strings.TrimSpace(string(body.ExpiresAt))
+		switch {
+		case raw == "null":
+			clearExpiresAt = true
+		case strings.HasPrefix(raw, "\""):
+			var s string
+			if err := json.Unmarshal(body.ExpiresAt, &s); err != nil {
+				api.WriteError(w, http.StatusBadRequest,
+					errCodeInvalidExpiresAt, messageForExpiresAtCode(errCodeInvalidExpiresAt))
+				return
+			}
+			parsed, code := parseExpiresAt(s, time.Now().UTC())
+			if code != "" {
+				api.WriteError(w, http.StatusBadRequest, code, messageForExpiresAtCode(code))
+				return
+			}
+			expiresAtPtr = &parsed
+		default:
+			api.WriteError(w, http.StatusBadRequest,
+				errCodeInvalidExpiresAt, messageForExpiresAtCode(errCodeInvalidExpiresAt))
+			return
+		}
+	}
+
 	patch := keys.KeyPatch{
 		Name:            body.Name,
 		DailyBudgetUSD:  body.DailyBudgetUSD,
@@ -401,6 +509,8 @@ func (s *Server) handleUpdateKey(w http.ResponseWriter, r *http.Request) {
 		RPMLimit:        body.RPMLimit,
 		MaxConcurrent:   body.MaxConcurrent,
 		UpstreamBaseURL: canonicalBaseURL,
+		ExpiresAt:       expiresAtPtr,
+		ClearExpiresAt:  clearExpiresAt,
 	}
 
 	updated, err := s.keys.Update(r.Context(), id, patch)

@@ -197,6 +197,53 @@ func BenchmarkRein_SQLite_WithBudget_PerKeyOverride_ZeroLatency(b *testing.B) {
 	drive200(b, url, tok)
 }
 
+// benchSetupExpires mirrors benchSetup but mints a key with a future
+// expires_at so the hot-path IsExpired branch runs on every request.
+// The extra cost vs BenchmarkRein_SQLite_WithBudget_ZeroLatency is one
+// nil check + one time comparison (+ a UTC conversion). A regression
+// here would mean the IsExpired helper picked up an allocation or map
+// lookup.
+func benchSetupExpires(b *testing.B, upstream *httptest.Server) (string, string) {
+	b.Helper()
+	store := buildStore(b, true)
+	id, _ := keys.GenerateID()
+	token, _ := keys.GenerateToken()
+	future := time.Now().UTC().Add(24 * time.Hour)
+	vk := &keys.VirtualKey{
+		ID: id, Token: token, Name: "bench-exp",
+		Upstream: keys.UpstreamOpenAI, UpstreamKey: "sk-fake",
+		DailyBudgetUSD: 1_000_000, MonthBudgetUSD: 1_000_000,
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: &future,
+	}
+	if err := store.Create(context.Background(), vk); err != nil {
+		b.Fatal(err)
+	}
+	pricer, err := meter.LoadPricer()
+	if err != nil {
+		b.Fatal(err)
+	}
+	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), nil, nil,
+		meter.NewPricerHolder(pricer), upstream.URL, "https://api.anthropic.com")
+	if err != nil {
+		b.Fatal(err)
+	}
+	rein := httptest.NewServer(p)
+	b.Cleanup(rein.Close)
+	return rein.URL, token
+}
+
+// BenchmarkRein_SQLite_WithBudget_WithExpiresAt_ZeroLatency measures
+// the hot-path cost of the #77 IsExpired check when the key does carry
+// a future expires_at. Compare against BenchmarkRein_SQLite_WithBudget_ZeroLatency
+// (same setup, ExpiresAt == nil): the delta must be within noise.
+func BenchmarkRein_SQLite_WithBudget_WithExpiresAt_ZeroLatency(b *testing.B) {
+	up := mockUpstream()
+	b.Cleanup(up.Close)
+	url, tok := benchSetupExpires(b, up)
+	drive200(b, url, tok)
+}
+
 // --- realistic-latency benchmarks (throughput is bounded by upstream) ---
 
 // 500ms upstream: typical gpt-4o short response. Throughput is

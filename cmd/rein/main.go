@@ -128,6 +128,12 @@ func main() {
 		startReloadHandlers(shutdownCtx, logger, cfg, basePricer, pricerHolder)
 	}
 
+	// Expiry sweeper (#77). Runs against the same shutdownCtx as the
+	// reload handlers so SIGINT / SIGTERM cancels it cleanly before the
+	// HTTP server drain; the sweeper never blocks graceful shutdown.
+	go keys.RunExpirySweeper(shutdownCtx, keystore, cfg.ExpirySweepInterval)
+	logger.Info("expiry sweeper started", "interval", cfg.ExpirySweepInterval)
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop

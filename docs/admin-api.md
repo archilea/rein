@@ -82,7 +82,9 @@ budgets on the way back.
 
 `name` and `upstream_key` are required. `upstream` must be `openai` or
 `anthropic`. Budgets and rate limits are optional and default to zero, which is
-treated as unlimited.
+treated as unlimited. `expires_at` is optional; omit it for a key with no
+expiry, see [Time-bounded keys](#time-bounded-keys) for the auto-revocation
+semantics.
 
 ```bash
 curl -X POST "$REIN_URL/admin/v1/keys" \
@@ -167,7 +169,13 @@ are changed; absent fields are preserved. Zero values explicitly set the cap
 to unlimited (same semantics as create).
 
 Mutable fields: `name`, `daily_budget_usd`, `month_budget_usd`, `rps_limit`,
-`rpm_limit`, `max_concurrent`, `upstream_base_url`.
+`rpm_limit`, `max_concurrent`, `upstream_base_url`, `expires_at`.
+
+`expires_at` is tri-state on PATCH: omit the field to leave it unchanged, pass
+an RFC3339 UTC timestamp to set or replace the expiry, or pass the explicit
+JSON value `null` to clear the expiry. Past or malformed timestamps are
+rejected with the structured codes documented in
+[Time-bounded keys](#time-bounded-keys).
 
 Immutable fields (`id`, `token`, `upstream`, `upstream_key`, `created_at`,
 `revoked_at`) cannot be changed and are rejected with `400` if included.
@@ -237,6 +245,128 @@ Response is the revoked key view with `revoked_at` populated:
   "created_at": "2026-04-10T12:00:00Z",
   "revoked_at": "2026-04-10T13:30:00Z"
 }
+```
+
+## Time-bounded keys
+
+Any virtual key can carry an optional `expires_at` (RFC3339 UTC timestamp)
+that automates revocation. Two independent brakes enforce it:
+
+- The proxy hot path rejects requests using an expired key with a `401`
+  whose body is bit-for-bit identical to a manually revoked key
+  (`{"error":{"code":"key_revoked", ...}}`). Clients cannot tell whether
+  the key was auto-revoked or revoked by an operator; the expiry schedule
+  never leaks outside the admin surface.
+- A background sweeper ticks on `REIN_EXPIRY_SWEEP_INTERVAL` (default
+  `60s`, bounded to `[10s, 1h]`) and stamps `revoked_at = expires_at`
+  on any expired key that the hot path had already been rejecting. The
+  resulting database row is indistinguishable from one that was manually
+  revoked, except `revoked_at == expires_at` within a few milliseconds,
+  which is the signal operators can grep for to audit which revocations
+  were scheduled vs reactive.
+
+### Validation
+
+- `expires_at` must parse as `time.RFC3339` / `time.RFC3339Nano` and must
+  be strictly in the future (more than 1 second from now). Past values
+  are rejected with `400 Bad Request` and `code = "expires_in_past"`.
+  Malformed strings are rejected with `code = "invalid_expires_at"`. Both
+  use the same envelope shape the rest of the admin API uses.
+- There is no upper bound: a 10-year `expires_at` is valid. Keep your
+  own calendar discipline for very long-lived keys.
+- All `expires_at` values are normalized to UTC at the admin boundary.
+
+### Contractor example
+
+Mint a key that auto-revokes in 30 days. Good for contractors, vendor
+evaluations, and anyone on a fixed-length engagement:
+
+```bash
+EXPIRES=$(python3 -c 'import datetime;print((datetime.datetime.now(datetime.UTC)+datetime.timedelta(days=30)).isoformat(timespec="seconds"))')
+
+curl -X POST "$REIN_URL/admin/v1/keys" \
+  -H "Authorization: Bearer $REIN_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "contractor-acme",
+    "upstream": "openai",
+    "upstream_key": "sk-your-real-openai-key",
+    "daily_budget_usd": 25,
+    "expires_at": "'"$EXPIRES"'"
+  }'
+```
+
+Response includes `expires_at` in the view:
+
+```json
+{
+  "id": "key_...",
+  "name": "contractor-acme",
+  "upstream": "openai",
+  "daily_budget_usd": 25,
+  "month_budget_usd": 0,
+  "rps_limit": 0,
+  "rpm_limit": 0,
+  "max_concurrent": 0,
+  "created_at": "2026-04-17T12:00:00Z",
+  "expires_at": "2026-05-17T12:00:00Z",
+  "token": "rein_live_..."
+}
+```
+
+### Break-glass / incident-response tokens
+
+Mint a short-lived high-cap key for an on-call responder and have it
+auto-revoke at shift end. No "who do I remember to revoke at 5pm" risk:
+
+```bash
+curl -X POST "$REIN_URL/admin/v1/keys" \
+  -H "Authorization: Bearer $REIN_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "oncall-break-glass",
+    "upstream": "openai",
+    "upstream_key": "sk-your-real-openai-key",
+    "max_concurrent": 50,
+    "expires_at": "2026-04-17T23:59:00Z"
+  }'
+```
+
+### Extending or clearing an existing expiry
+
+Use `PATCH /admin/v1/keys/{id}`:
+
+```bash
+# Extend by 7 days
+curl -X PATCH "$REIN_URL/admin/v1/keys/key_..." \
+  -H "Authorization: Bearer $REIN_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"expires_at": "2026-05-24T12:00:00Z"}'
+
+# Convert to a permanent key (remove the expiry entirely)
+curl -X PATCH "$REIN_URL/admin/v1/keys/key_..." \
+  -H "Authorization: Bearer $REIN_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"expires_at": null}'
+```
+
+Backdating `expires_at` to force immediate revocation is intentionally
+rejected: use `POST /admin/v1/keys/{id}/revoke` for that instead, which
+is the unambiguous operator idiom for "cut this key now".
+
+### Auditing upcoming expiries
+
+Every list response includes `expires_at` when set and omits it
+otherwise, so you can pipe the admin API through `jq` to find keys
+expiring in the next week:
+
+```bash
+curl -s -H "Authorization: Bearer $REIN_ADMIN_TOKEN" \
+  "$REIN_URL/admin/v1/keys" | jq '
+    .keys[] | select(.expires_at != null)
+    | {id, name, expires_at}
+    | select(.expires_at < (now + 7*24*3600 | strftime("%Y-%m-%dT%H:%M:%SZ")))
+  '
 ```
 
 ## Rate limiting
