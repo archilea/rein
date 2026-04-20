@@ -224,6 +224,34 @@ curl -X POST http://localhost:8080/admin/v1/killswitch \
 
 All `/v1/*` calls return `503 Service Unavailable` with `Retry-After: 60` until you unfreeze. The kill-switch is a single atomic boolean read on the hot path, so the check is effectively free when off and instant when on.
 
+## 5. Rolling deploys on Kubernetes
+
+Rein supports graceful drain for rolling updates. On `SIGTERM` or `SIGINT` the process flips a drain flag and gives in-flight requests up to `REIN_SHUTDOWN_GRACE` (default `30s`, bounded to `[1s, 5m]`) to finish before force-closing any connections still active. New `/v1/*` requests during drain receive `503 Service Unavailable` with `Retry-After: 5` and the structured `{"error":{"code":"draining", ...}}` envelope so clients retry against another replica via your load balancer.
+
+Two HTTP probes split the signals a Kubernetes pod needs:
+
+- `/healthz` — **liveness**. Returns `200 OK` for the entire process lifetime. A liveness-fail means the process is stuck, so Kubernetes restarts the pod.
+- `/readyz` — **readiness**. Returns `200 {"status":"ready"}` normally, `503 {"status":"draining"}` once the drain flag is set. A readiness-fail means the pod should be removed from the Service's endpoint pool so no new traffic arrives, but the pod must NOT be restarted — that would kill the in-flight requests the drain window is protecting.
+
+Probe wiring:
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  periodSeconds: 10
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 8080
+  periodSeconds: 5
+```
+
+Set `terminationGracePeriodSeconds` on the pod to at least `REIN_SHUTDOWN_GRACE + 5s` so Kubernetes does not `SIGKILL` Rein before its own drain window elapses.
+
+A second `SIGTERM`/`SIGINT` during drain force-closes immediately: operators who want to cut a bad deploy short do not have to wait out the full grace window.
+
 ## Next steps
 
 - Full admin API reference (kill-switch, keys, health, version) with copy-paste curl: [docs/admin-api.md](./admin-api.md).

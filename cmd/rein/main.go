@@ -10,10 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -92,6 +95,12 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
+	// /readyz is the Kubernetes-style readiness probe (#76). Returns 200
+	// normally and 503 once the drain flag is set, so orchestrators can
+	// take this pod out of rotation before srv.Shutdown force-closes
+	// anything. /healthz stays on the liveness semantic (process up) so a
+	// drain does not trigger a restart-the-pod reaction.
+	mux.HandleFunc("GET /readyz", readyzHandler(p))
 	mux.HandleFunc("GET /version", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"name":"rein","version":"` + version + `"}`))
@@ -99,6 +108,12 @@ func main() {
 	mux.Handle("/v1/", p)
 	adminSrv.Mount(mux)
 
+	// inflight counts connections currently mid-request. Used only for
+	// the "forcibly-closed on drain timeout" log line so operators can
+	// see whether their REIN_SHUTDOWN_GRACE is too short. Tracked via
+	// http.Server.ConnState transitions; see inflightConnTracker for
+	// the exact idle/closed/hijacked handling.
+	tracker := newInflightConnTracker()
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           mux,
@@ -106,6 +121,7 @@ func main() {
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      120 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		ConnState:         tracker.observe,
 	}
 
 	go func() {
@@ -134,17 +150,42 @@ func main() {
 	go keys.RunExpirySweeper(shutdownCtx, keystore, cfg.ExpirySweepInterval)
 	logger.Info("expiry sweeper started", "interval", cfg.ExpirySweepInterval)
 
-	stop := make(chan os.Signal, 1)
+	// Signal handling (#76). Buffer is 2 so a second signal arriving
+	// during drain is captured instead of terminating the process via
+	// the default handler. First signal → drain. Second signal within
+	// the grace window → immediate force-close via srv.Close.
+	stop := make(chan os.Signal, 2)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
-	logger.Info("shutting down")
+	logger.Info("shutdown signal received; entering drain", "grace", cfg.ShutdownGrace)
+	p.SetDraining(true)
 	cancelShutdown()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		logger.Error("graceful shutdown failed", "err", err)
-		os.Exit(1)
+	shutdownErr := make(chan error, 1)
+	go func() { shutdownErr <- srv.Shutdown(ctx) }()
+
+	select {
+	case err := <-shutdownErr:
+		if err != nil {
+			// Shutdown returns ctx.DeadlineExceeded when the grace
+			// window expired with connections still in-flight. The
+			// force-close count is a best-effort read of the tracker;
+			// it is informative for tuning REIN_SHUTDOWN_GRACE but is
+			// not a precise number because StateIdle / StateClosed
+			// transitions can race the snapshot.
+			logger.Warn("graceful shutdown timed out; in-flight requests force-closed",
+				"err", err, "force_closed", tracker.inflight())
+		}
+	case <-stop:
+		// Second signal during drain → immediate force-close. srv.Close
+		// unblocks srv.Shutdown with http.ErrServerClosed, which we
+		// drain from shutdownErr so the goroutine exits cleanly.
+		logger.Warn("second shutdown signal received; force-closing",
+			"force_closed", tracker.inflight())
+		_ = srv.Close()
+		<-shutdownErr
 	}
 
 	// Release the spend meter's DB handle, if any. The Meter interface does
@@ -232,6 +273,71 @@ func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+// readyzHandler returns a handler that reports 200 + {"status":"ready"}
+// when the proxy is serving new traffic and 503 + {"status":"draining"}
+// once the proxy has been flipped into drain mode. The #76 contract is
+// narrow on purpose: /readyz is strictly "should this replica be in the
+// load balancer's pool?". It does not report keystore health, upstream
+// reachability, or anything that would drift into observability scope.
+//
+// Kept in a small factory so the handler closes over the exact Proxy
+// instance whose draining flag the signal handler flips. A test can
+// build its own Proxy, flip SetDraining, and assert the response shape
+// without bringing up the full http.Server.
+func readyzHandler(p *proxy.Proxy) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if p.IsDraining() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"status":"draining"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"ready"}`))
+	}
+}
+
+// inflightConnTracker reports the number of HTTP connections that are
+// currently in the StateActive (mid-request) phase. Used only by the
+// shutdown-drain path so the "connections force-closed" log line is
+// informative for operators tuning REIN_SHUTDOWN_GRACE.
+//
+// StateActive increments inflight; every exit transition (StateIdle,
+// StateClosed, StateHijacked) decrements, but only when we have a
+// record of the connection entering StateActive. The sync.Map keys on
+// the net.Conn pointer so a keep-alive connection that goes
+// Active → Idle → Active → Idle does not double-count.
+type inflightConnTracker struct {
+	active sync.Map
+	count  atomic.Int64
+}
+
+func newInflightConnTracker() *inflightConnTracker {
+	return &inflightConnTracker{}
+}
+
+// observe is passed to http.Server.ConnState. It is invoked on every
+// connection state transition the net/http package tracks. Safe for
+// concurrent use: sync.Map and atomic.Int64 are both lock-free.
+func (t *inflightConnTracker) observe(c net.Conn, state http.ConnState) {
+	switch state {
+	case http.StateActive:
+		if _, loaded := t.active.LoadOrStore(c, struct{}{}); !loaded {
+			t.count.Add(1)
+		}
+	case http.StateIdle, http.StateClosed, http.StateHijacked:
+		if _, loaded := t.active.LoadAndDelete(c); loaded {
+			t.count.Add(-1)
+		}
+	}
+}
+
+// inflight returns the current count. Single atomic load; the value
+// can change the instant it returns, so callers should treat it as a
+// best-effort snapshot rather than a transactional count.
+func (t *inflightConnTracker) inflight() int64 {
+	return t.count.Load()
 }
 
 // openKeystore builds a keys.Store from the configured DB URL.

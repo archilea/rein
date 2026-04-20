@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/archilea/rein/internal/api"
@@ -70,6 +71,13 @@ type Proxy struct {
 	concurrency concurrency.Store
 	openai      http.Handler
 	anthropic   http.Handler
+	// draining is the shutdown-drain flag (#76). When true, the hot path
+	// rejects new /v1/* requests with 503 + Retry-After: 5 + a structured
+	// "draining" envelope before touching the kill-switch or keystore.
+	// Flipped by cmd/rein on SIGTERM/SIGINT; read on every request with a
+	// single atomic load so the off-state cost is indistinguishable from
+	// the pre-#76 hot path.
+	draining atomic.Bool
 }
 
 // New constructs a Proxy with handlers for each supported upstream.
@@ -103,6 +111,22 @@ func New(store keys.Store, killSwitch killswitch.Switch, m meter.Meter, r rates.
 		openai:      oai,
 		anthropic:   ant,
 	}, nil
+}
+
+// SetDraining flips the shutdown-drain flag. Idempotent: calling it
+// multiple times with the same value is a no-op. Callers (cmd/rein's
+// signal handler) set true on SIGTERM/SIGINT; there is no reverse
+// transition in production, but the setter accepts false for tests
+// that want to reset between cases.
+func (p *Proxy) SetDraining(v bool) {
+	p.draining.Store(v)
+}
+
+// IsDraining reports whether the drain flag is currently set. Lock-free
+// single atomic load. Used by the /readyz handler so readiness probes
+// read exactly the same state the proxy hot path reads.
+func (p *Proxy) IsDraining() bool {
+	return p.draining.Load()
 }
 
 // vkeyContextKey is the key used to stash a resolved VirtualKey on a request context.
@@ -142,6 +166,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	wantUpstream := expectedUpstreamForPath(r.URL.Path)
 	if wantUpstream == "" {
 		api.WriteError(w, http.StatusNotFound, CodeUnknownRoute, "unknown upstream route")
+		return
+	}
+
+	// Drain fast-path (#76). Placed before the kill-switch so a replica in
+	// drain mode during a rolling deploy sheds load with one atomic load
+	// and one structured 503, cheaper than the kill-switch path.
+	// Retry-After: 5 nudges clients to retry against a sibling replica via
+	// the load balancer; drain is a planned signal, not an incident, so the
+	// code is "draining" (distinct from "kill_switch_engaged").
+	if p.draining.Load() {
+		w.Header().Set("Retry-After", "5")
+		api.WriteError(w, http.StatusServiceUnavailable, CodeDraining, "rein replica is draining; retry on another replica")
 		return
 	}
 

@@ -34,6 +34,20 @@ const (
 	ExpirySweepIntervalDefault = 60 * time.Second
 )
 
+// ShutdownGrace bounds (#76): the drain window gives in-flight LLM
+// calls time to complete after SIGTERM/SIGINT before the HTTP server
+// force-closes. 1s is the floor ("you really just wanted immediate
+// shutdown" is honored by a second signal); 5m is the ceiling because
+// anything longer than an LLM call timeout is pointless and most
+// orchestrators will SIGKILL long before then. 30s default matches
+// typical reasoning-model tail latency while still fitting inside a
+// Kubernetes default terminationGracePeriodSeconds of 30.
+const (
+	ShutdownGraceMin     = 1 * time.Second
+	ShutdownGraceMax     = 5 * time.Minute
+	ShutdownGraceDefault = 30 * time.Second
+)
+
 // DefaultConfigFilePath is the well-known path Rein probes for an
 // operator config file when REIN_CONFIG_FILE is unset. This matches
 // the nginx / postgres / redis convention of "well-known path with
@@ -67,6 +81,7 @@ type Config struct {
 	ConfigFileSource    string        // one of ConfigSource* constants; set by Load
 	ConfigPollInterval  time.Duration // zero = SIGHUP-only reload, no background poll
 	ExpirySweepInterval time.Duration // tick cadence for the expiry auto-revocation sweeper
+	ShutdownGrace       time.Duration // max drain window between SIGTERM and force-close (#76)
 }
 
 // Load reads configuration from environment variables.
@@ -138,6 +153,25 @@ func Load() (*Config, error) {
 			)
 		}
 		cfg.ExpirySweepInterval = d
+	}
+
+	// REIN_SHUTDOWN_GRACE is optional. Unset means ShutdownGraceDefault
+	// (30s). Set values are parsed via time.ParseDuration and bounded to
+	// [ShutdownGraceMin, ShutdownGraceMax] so "0s" / "0" do not silently
+	// disable the drain window and "24h" cannot make a pod unroll-able.
+	cfg.ShutdownGrace = ShutdownGraceDefault
+	if raw := os.Getenv("REIN_SHUTDOWN_GRACE"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("REIN_SHUTDOWN_GRACE: %w", err)
+		}
+		if d < ShutdownGraceMin || d > ShutdownGraceMax {
+			return nil, fmt.Errorf(
+				"REIN_SHUTDOWN_GRACE %s out of range; must be between %s and %s",
+				d, ShutdownGraceMin, ShutdownGraceMax,
+			)
+		}
+		cfg.ShutdownGrace = d
 	}
 
 	return cfg, nil

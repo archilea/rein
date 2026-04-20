@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Graceful shutdown with drain, configurable grace, and `/readyz`**
+  (#76). On `SIGTERM` / `SIGINT` Rein flips a proxy-wide drain flag
+  (a single `atomic.Bool`, read before the kill-switch on the hot
+  path) and runs `http.Server.Shutdown` against a context bounded by
+  `REIN_SHUTDOWN_GRACE` (new env var, `time.ParseDuration`, default
+  `30s`, bounded to `[1s, 5m]`). New `/v1/*` requests during drain
+  receive `503 Service Unavailable` with `Retry-After: 5` and the
+  structured `{"error":{"code":"draining", ...}}` envelope so clients
+  retry against a sibling replica via the load balancer. In-flight
+  requests, streaming SSE included, keep running until the grace
+  deadline expires; at expiry net/http force-closes remaining
+  connections and Rein logs a WARN with the count of connections
+  still mid-request so operators can tune the grace value. A new
+  `/readyz` endpoint returns `200 {"status":"ready"}` normally and
+  `503 {"status":"draining"}` during drain; `/healthz` stays on the
+  liveness semantic and does not flip on drain, so Kubernetes
+  readiness-fails remove the pod from the Service pool without
+  triggering a restart that would kill in-flight work. A second
+  signal within the grace window force-closes immediately via
+  `srv.Close()` for operators who want to cut a bad deploy short.
+  The admin port shares the same listener and therefore drains with
+  the proxy; splitting them is tracked as a future follow-up. See
+  `docs/architecture.md` "Shutdown" and `docs/quickstart.md` for the
+  Kubernetes probe wiring.
+
 - **Per-key upstream request timeout** (#30). Virtual keys gain an
   optional `upstream_timeout_seconds` ceiling (`[0, 3600]`, default
   `0` means unlimited) that bounds the wall-clock duration of any one
