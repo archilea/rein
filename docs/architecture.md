@@ -44,6 +44,30 @@ For SSE responses, Rein tees the upstream body as it flows to the client. It doe
 
 Spend is recorded on a background context, so a client disconnect mid-stream cannot race the meter write.
 
+### Streaming under a per-key timeout
+
+When a virtual key carries a non-zero `upstream_timeout_seconds` (see
+[admin-api.md](./admin-api.md#upstream-request-timeout)) and the deadline
+fires mid-stream, the HTTP status has already been flushed as `200 OK` and
+cannot be retroactively changed to `504`. Rein handles this deterministically:
+
+- The stream reader detects `context.DeadlineExceeded`, writes a single SSE
+  comment line (`: rein upstream timeout after N seconds\n\n`) to the
+  client, and closes the connection. SSE comments are legal no-ops in every
+  compliant parser, so strict clients see a clean close with no corrupted
+  frame. Clients that look for a `[DONE]` sentinel will not see one, which
+  is the correct signal because the call did not finish normally.
+- `streamMeter.Close()` still fires its `onDone` callback with whatever
+  `input_tokens` / `output_tokens` were parsed before the cancel, so
+  partial usage is recorded against the key's budget on the same
+  background-context meter write described above. A hanging stream that
+  was canceled at second 60 after the upstream emitted one usage chunk at
+  second 30 records the usage from that chunk, not zero.
+
+This is why the background-context Record invariant is load-bearing: the
+stream reader's cancel path and the meter write must not compete on the
+same context for the cancel-to-propagate.
+
 ## Persistence
 
 One table. One driver. No CGO.

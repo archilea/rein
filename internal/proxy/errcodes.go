@@ -30,6 +30,13 @@ const (
 	// CodeUnknownRoute is returned (404) when the request path is not a known upstream route.
 	CodeUnknownRoute = "unknown_route"
 
+	// CodeUpstreamTimeout is returned (504) when a request exceeds the per-key
+	// upstream_timeout_seconds ceiling. Fires only on non-streaming responses:
+	// on streams the 200 status has already been flushed before the timeout
+	// fires, so the stream reader writes a short SSE comment line and closes
+	// the connection instead of re-flagging the status.
+	CodeUpstreamTimeout = "upstream_timeout"
+
 	// CodeInternalError is returned (500) for unexpected server-side failures
 	// (kill-switch read error, key resolution error, no handler wired).
 	CodeInternalError = "internal_error"

@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-key upstream request timeout** (#30). Virtual keys gain an
+  optional `upstream_timeout_seconds` ceiling (`[0, 3600]`, default
+  `0` means unlimited) that bounds the wall-clock duration of any one
+  upstream LLM call. This is the `proxy_read_timeout` analog for LLM
+  traffic, sized for reasoning-model tail latency. When a non-zero
+  timeout is configured, the proxy hot path wraps the request context
+  with `context.WithTimeout` and defers cancel release on normal
+  completion. Non-streaming responses that exceed the deadline return
+  `504 Gateway Timeout` with `Retry-After: 1` and the structured
+  `upstream_timeout` code, naming the configured timeout value in the
+  message body. Streaming (SSE) responses cannot change their already-
+  flushed `200 OK` status; the stream reader writes a short SSE comment
+  line (`: rein upstream timeout after N seconds\n\n`) and closes the
+  connection cleanly, and the partial-metering invariant from
+  `docs/architecture.md` still holds — any usage chunks parsed before
+  the cancel are recorded against the key's budget on a background
+  context. The transport-level dial timeout continues to fire
+  independently on unreachable upstreams (`502`, not `504`). Admin API
+  accepts the field on `POST /admin/v1/keys` and
+  `PATCH /admin/v1/keys/{id}` with `[0, 3600]` validation; values over
+  `3600` are rejected to protect operators from typos such as `86400`.
+  SQLite keystore gains an idempotent additive `upstream_timeout_seconds
+  INTEGER NOT NULL DEFAULT 0` column migration. Hot-path overhead is
+  within noise for unlimited keys (skip branch) and under 1 µs for
+  limited keys that never fire (one `context.WithTimeout` + deferred
+  cancel), measured against the existing `BenchmarkRein_SQLite_WithBudget_ZeroLatency`
+  baseline. See `docs/admin-api.md` "Upstream request timeout" for
+  operator recipes and the interaction matrix with other per-key brakes.
+
 - **Per-key `expires_at` with automatic revocation** (#77). Virtual
   keys gain an optional RFC3339 UTC `expires_at` field. Admin API
   accepts it on create and on `PATCH /admin/v1/keys/{id}` (explicit

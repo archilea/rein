@@ -33,14 +33,15 @@ Cost and safety controls:
 5. **Instant global kill-switch** via `POST /admin/v1/killswitch`. One HTTP call and every `/v1/*` request returns `503 Service Unavailable` with `Retry-After: 60` until someone unfreezes. A single `atomic.Bool` read on the hot path, effectively free when off, instant when on.
 6. **Per-key rate limiting** with RPS (requests per second) and RPM (requests per minute) caps. A sliding window counter bounds request velocity before the upstream is contacted. Over-limit requests return `429 Too Many Requests` with `Retry-After`.
 7. **Per-key concurrency cap** (`max_concurrent`) bounds the number of simultaneously in-flight requests per virtual key. The nginx `limit_conn` analog: rate limit bounds arrival velocity, concurrency cap bounds work-in-progress. Together they bound budget overshoot to `max_concurrent x max_request_cost`. Over-limit requests return `429 Too Many Requests` with `Retry-After: 1`.
-8. **Spend metering** from both JSON and SSE streaming responses, priced against an embedded pricing table verified against OpenAI and Anthropic vendor docs. Dated model snapshots (`claude-opus-4-5-20251101`, `gpt-4o-2024-08-06`) resolve to their base entries automatically.
-9. **Streaming usage auto-inject.** For OpenAI chat completions, Rein injects `stream_options.include_usage: true` into the outbound body so streaming clients cannot silently bypass budget enforcement. An explicit client opt-out is respected and logged.
+8. **Per-key upstream request timeout** (`upstream_timeout_seconds`, `[0, 3600]`) bounds the wall-clock duration of any one upstream call. The `proxy_read_timeout` analog for LLM traffic, sized for reasoning-model tail latency. Non-streaming responses that exceed the ceiling return `504 Gateway Timeout` with `Retry-After: 1`; streaming responses close the SSE stream cleanly with a final comment line and record whatever usage was parsed before the cancel. Default `0` means unlimited and pays zero hot-path cost.
+9. **Spend metering** from both JSON and SSE streaming responses, priced against an embedded pricing table verified against OpenAI and Anthropic vendor docs. Dated model snapshots (`claude-opus-4-5-20251101`, `gpt-4o-2024-08-06`) resolve to their base entries automatically.
+10. **Streaming usage auto-inject.** For OpenAI chat completions, Rein injects `stream_options.include_usage: true` into the outbound body so streaming clients cannot silently bypass budget enforcement. An explicit client opt-out is respected and logged.
 
 Operational foundation:
 
-10. **Durable SQLite keystore + spend meter** via `modernc.org/sqlite` (pure Go, no CGO). WAL mode enabled. Spend totals survive process restart, OOM, and `kill -9`. Single static binary deploys anywhere.
-11. **Encryption at rest** for the upstream key column using AES-256-GCM. Rein refuses to start without `REIN_ENCRYPTION_KEY`, so plaintext credentials cannot land on disk by accident. Ciphertext carries a `v1:` tag so future algorithm rotations do not require a schema migration.
-12. **Offline encryption key rotation** via the `rein-rotate-keys` CLI. Rotates the AES-256-GCM key that wraps the upstream credential column, idempotent and atomic. Operator runbook in `docs/runbooks/key-rotation.md`.
+11. **Durable SQLite keystore + spend meter** via `modernc.org/sqlite` (pure Go, no CGO). WAL mode enabled. Spend totals survive process restart, OOM, and `kill -9`. Single static binary deploys anywhere.
+12. **Encryption at rest** for the upstream key column using AES-256-GCM. Rein refuses to start without `REIN_ENCRYPTION_KEY`, so plaintext credentials cannot land on disk by accident. Ciphertext carries a `v1:` tag so future algorithm rotations do not require a schema migration.
+13. **Offline encryption key rotation** via the `rein-rotate-keys` CLI. Rotates the AES-256-GCM key that wraps the upstream credential column, idempotent and atomic. Operator runbook in `docs/runbooks/key-rotation.md`.
 
 ## Who this is for
 
@@ -255,15 +256,16 @@ flowchart LR
     Rein -- "response stream" --> Client
 ```
 
-Inside Rein, every `/v1/*` request passes through seven checks in order:
+Inside Rein, every `/v1/*` request passes through eight checks in order:
 
 1. **Kill-switch check.** A single `atomic.Bool` read. If frozen, returns `503 Service Unavailable` with `Retry-After: 60`. No key lookup, no upstream dial.
 2. **Key lookup.** Resolves the inbound `Authorization: Bearer rein_live_...` against the SQLite keystore, with AES-256-GCM decrypt of the `upstream_key` column. Returns `401` if missing, invalid, or revoked.
 3. **Budget check.** Reads the key's daily and monthly USD totals from the spend meter. Returns `402 Payment Required` if either cap is reached. The upstream is never contacted.
 4. **Rate limit check.** If the key has `rps_limit` or `rpm_limit` set, checks the in-memory sliding window counter. Returns `429 Too Many Requests` with `Retry-After` if either cap is breached. The upstream is never contacted.
 5. **Concurrency cap check.** If the key has `max_concurrent` set, an atomic per-key counter is incremented; if the new value exceeds the cap, it is decremented and the request returns `429 Too Many Requests` with `Retry-After: 1`. A deferred Release frees the slot after the adapter returns, covering happy path, upstream error, client disconnect, and panic unwind alike. Unlimited keys (`max_concurrent: 0`) short-circuit before any state lookup and pay zero cost.
-6. **Forward.** The adapter swaps the rein bearer for the real upstream key (`Authorization: Bearer` for OpenAI, `x-api-key` for Anthropic) and proxies through a tuned `httputil.ReverseProxy`.
-7. **Meter record on the response path.** The adapter parses token usage from the upstream response (streaming or buffered), computes USD cost from the embedded pricing table, and records the amount. The next request's Check sees the updated total.
+6. **Upstream timeout wrap.** If the key has `upstream_timeout_seconds` set, the request context is wrapped with `context.WithTimeout`. Non-streaming responses that exceed the deadline return `504 Gateway Timeout` with `Retry-After: 1`; streaming responses close the SSE stream cleanly with a final comment line. Unlimited keys (`upstream_timeout_seconds: 0`) skip the wrap and pay zero cost.
+7. **Forward.** The adapter swaps the rein bearer for the real upstream key (`Authorization: Bearer` for OpenAI, `x-api-key` for Anthropic) and proxies through a tuned `httputil.ReverseProxy`.
+8. **Meter record on the response path.** The adapter parses token usage from the upstream response (streaming or buffered), computes USD cost from the embedded pricing table, and records the amount. The next request's Check sees the updated total.
 
 The kill-switch sits first so it can shed load with a single atomic read during an incident. Metering runs on the response path, so the check-then-record ordering is what creates the "soft cap under concurrent bursts" caveat documented in the Budgets section.
 
@@ -285,8 +287,10 @@ Rein is a thin layer. The only honest question is whether it is honest about bei
 | Concurrency cap, unlimited (#27) | 34.7 µs | ~28,800 | 308 | `max_concurrent: 0` short-circuit |
 | Concurrency cap, limited (#27) | 34.1 µs | ~29,300 | 310 | One atomic Add + deferred Release |
 | Multi-key concurrency, 100 keys (#27) | 34.4 µs | ~29,000 | 308 | Cache-line padding prevents false sharing |
+| Upstream timeout, unlimited (#30) | 34.5 µs | ~28,900 | 311 | `upstream_timeout_seconds: 0` skip |
+| Upstream timeout, limited, not firing (#30) | 34.7 µs | ~28,700 | 321 | One `context.WithTimeout` + deferred cancel |
 
-Every 0.2 brake (rate limit, concurrency cap, base URL override) adds **zero measurable overhead** versus the unbraked baseline. Budget enforcement, rate limiting, and concurrency capping each cost a handful of nanoseconds amortized across the request; the bottleneck is everywhere except Rein.
+Every 0.2 and 0.3 brake (rate limit, concurrency cap, base URL override, expires_at, upstream timeout) adds **zero measurable overhead** versus the unbraked baseline. Budget enforcement, rate limiting, concurrency capping, and upstream timeouts each cost a handful of nanoseconds amortized across the request; the bottleneck is everywhere except Rein.
 
 ### Why this does not matter in production
 
@@ -372,7 +376,7 @@ Kept deliberately short. Features that would break the size ceiling are not here
 - [x] `0.3` `PATCH /admin/v1/keys/{id}`: update a key's caps without re-minting (#74)
 - [x] `0.3` Per-key `expires_at` with automatic revocation (#77)
 - [ ] `0.3` Per-key model allowlist (#28)
-- [ ] `0.3` Per-key upstream request timeout (#30)
+- [x] `0.3` Per-key upstream request timeout (#30)
 - [ ] `0.3` Graceful shutdown: drain flag, configurable grace, proxy-side 503, `/readyz` (#76)
 
 ## Contributing

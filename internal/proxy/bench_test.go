@@ -244,6 +244,65 @@ func BenchmarkRein_SQLite_WithBudget_WithExpiresAt_ZeroLatency(b *testing.B) {
 	drive200(b, url, tok)
 }
 
+// benchSetupTimeout mirrors benchSetup but mints a key with an
+// explicit UpstreamTimeoutSeconds. The caller picks a value large
+// enough not to fire during the bench so we only measure the
+// context.WithTimeout wrap + defer cancel overhead, not the timeout
+// path itself.
+func benchSetupTimeout(b *testing.B, upstream *httptest.Server, timeoutSeconds int) (string, string) {
+	b.Helper()
+	store := buildStore(b, true)
+	id, _ := keys.GenerateID()
+	token, _ := keys.GenerateToken()
+	vk := &keys.VirtualKey{
+		ID: id, Token: token, Name: "bench-timeout",
+		Upstream: keys.UpstreamOpenAI, UpstreamKey: "sk-fake",
+		DailyBudgetUSD: 1_000_000, MonthBudgetUSD: 1_000_000,
+		UpstreamTimeoutSeconds: timeoutSeconds,
+		CreatedAt:              time.Now().UTC(),
+	}
+	if err := store.Create(context.Background(), vk); err != nil {
+		b.Fatal(err)
+	}
+	pricer, err := meter.LoadPricer()
+	if err != nil {
+		b.Fatal(err)
+	}
+	p, err := New(store, killswitch.NewMemory(), meter.NewMemory(), nil, nil,
+		meter.NewPricerHolder(pricer), upstream.URL, "https://api.anthropic.com")
+	if err != nil {
+		b.Fatal(err)
+	}
+	rein := httptest.NewServer(p)
+	b.Cleanup(rein.Close)
+	return rein.URL, token
+}
+
+// BenchmarkRein_SQLite_WithBudget_TimeoutUnlimited_ZeroLatency
+// exercises a key with UpstreamTimeoutSeconds=0. Must match
+// BenchmarkRein_SQLite_WithBudget_ZeroLatency within noise: the
+// hot-path check is a single int compare with skip.
+func BenchmarkRein_SQLite_WithBudget_TimeoutUnlimited_ZeroLatency(b *testing.B) {
+	up := mockUpstream()
+	b.Cleanup(up.Close)
+	url, tok := benchSetupTimeout(b, up, 0)
+	drive200(b, url, tok)
+}
+
+// BenchmarkRein_SQLite_WithBudget_TimeoutLimited_ZeroLatency
+// exercises a key with UpstreamTimeoutSeconds set well beyond the
+// bench duration, so the context.WithTimeout wrap runs on every
+// request but the deadline never fires. The delta vs
+// BenchmarkRein_SQLite_WithBudget_TimeoutUnlimited_ZeroLatency is
+// exactly the cost of one context.WithTimeout + one defer cancel,
+// bounded under 1 µs per the feedback_rps_priority memory.
+func BenchmarkRein_SQLite_WithBudget_TimeoutLimited_ZeroLatency(b *testing.B) {
+	up := mockUpstream()
+	b.Cleanup(up.Close)
+	url, tok := benchSetupTimeout(b, up, 3600)
+	drive200(b, url, tok)
+}
+
 // --- realistic-latency benchmarks (throughput is bounded by upstream) ---
 
 // 500ms upstream: typical gpt-4o short response. Throughput is

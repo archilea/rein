@@ -43,6 +43,12 @@ const (
 // creation time.
 const expiresInFutureSkew = 1 * time.Second
 
+// maxUpstreamTimeoutSeconds is the upper bound on upstream_timeout_seconds.
+// One hour covers every realistic LLM request (reasoning models, extended
+// thinking, multi-turn tool use) and protects operators from typos such as
+// 86400 ("I meant a day" when the admin API takes seconds).
+const maxUpstreamTimeoutSeconds = 3600
+
 // Server exposes Rein's admin endpoints.
 type Server struct {
 	token      string
@@ -115,34 +121,36 @@ func (s *Server) handleSetFreeze(w http.ResponseWriter, r *http.Request) {
 // keyView is the safe projection of a VirtualKey for list/get responses.
 // It never includes the rein token or the upstream API key.
 type keyView struct {
-	ID              string     `json:"id"`
-	Name            string     `json:"name"`
-	Upstream        string     `json:"upstream"`
-	DailyBudgetUSD  float64    `json:"daily_budget_usd"`
-	MonthBudgetUSD  float64    `json:"month_budget_usd"`
-	RPSLimit        int        `json:"rps_limit"`
-	RPMLimit        int        `json:"rpm_limit"`
-	MaxConcurrent   int        `json:"max_concurrent"`
-	UpstreamBaseURL string     `json:"upstream_base_url,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	RevokedAt       *time.Time `json:"revoked_at,omitempty"`
-	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
+	ID                     string     `json:"id"`
+	Name                   string     `json:"name"`
+	Upstream               string     `json:"upstream"`
+	DailyBudgetUSD         float64    `json:"daily_budget_usd"`
+	MonthBudgetUSD         float64    `json:"month_budget_usd"`
+	RPSLimit               int        `json:"rps_limit"`
+	RPMLimit               int        `json:"rpm_limit"`
+	MaxConcurrent          int        `json:"max_concurrent"`
+	UpstreamTimeoutSeconds int        `json:"upstream_timeout_seconds"`
+	UpstreamBaseURL        string     `json:"upstream_base_url,omitempty"`
+	CreatedAt              time.Time  `json:"created_at"`
+	RevokedAt              *time.Time `json:"revoked_at,omitempty"`
+	ExpiresAt              *time.Time `json:"expires_at,omitempty"`
 }
 
 func viewOf(k *keys.VirtualKey) keyView {
 	return keyView{
-		ID:              k.ID,
-		Name:            k.Name,
-		Upstream:        k.Upstream,
-		DailyBudgetUSD:  k.DailyBudgetUSD,
-		MonthBudgetUSD:  k.MonthBudgetUSD,
-		RPSLimit:        k.RPSLimit,
-		RPMLimit:        k.RPMLimit,
-		MaxConcurrent:   k.MaxConcurrent,
-		UpstreamBaseURL: k.UpstreamBaseURL,
-		CreatedAt:       k.CreatedAt,
-		RevokedAt:       k.RevokedAt,
-		ExpiresAt:       k.ExpiresAt,
+		ID:                     k.ID,
+		Name:                   k.Name,
+		Upstream:               k.Upstream,
+		DailyBudgetUSD:         k.DailyBudgetUSD,
+		MonthBudgetUSD:         k.MonthBudgetUSD,
+		RPSLimit:               k.RPSLimit,
+		RPMLimit:               k.RPMLimit,
+		MaxConcurrent:          k.MaxConcurrent,
+		UpstreamTimeoutSeconds: k.UpstreamTimeoutSeconds,
+		UpstreamBaseURL:        k.UpstreamBaseURL,
+		CreatedAt:              k.CreatedAt,
+		RevokedAt:              k.RevokedAt,
+		ExpiresAt:              k.ExpiresAt,
 	}
 }
 
@@ -192,16 +200,17 @@ type createKeyResponse struct {
 
 func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name            string  `json:"name"`
-		Upstream        string  `json:"upstream"`
-		UpstreamKey     string  `json:"upstream_key"`
-		DailyBudgetUSD  float64 `json:"daily_budget_usd"`
-		MonthBudgetUSD  float64 `json:"month_budget_usd"`
-		RPSLimit        int     `json:"rps_limit"`
-		RPMLimit        int     `json:"rpm_limit"`
-		MaxConcurrent   int     `json:"max_concurrent"`
-		UpstreamBaseURL string  `json:"upstream_base_url"`
-		ExpiresAt       string  `json:"expires_at"`
+		Name                   string  `json:"name"`
+		Upstream               string  `json:"upstream"`
+		UpstreamKey            string  `json:"upstream_key"`
+		DailyBudgetUSD         float64 `json:"daily_budget_usd"`
+		MonthBudgetUSD         float64 `json:"month_budget_usd"`
+		RPSLimit               int     `json:"rps_limit"`
+		RPMLimit               int     `json:"rpm_limit"`
+		MaxConcurrent          int     `json:"max_concurrent"`
+		UpstreamTimeoutSeconds int     `json:"upstream_timeout_seconds"`
+		UpstreamBaseURL        string  `json:"upstream_base_url"`
+		ExpiresAt              string  `json:"expires_at"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid json body", http.StatusBadRequest)
@@ -235,6 +244,10 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.MaxConcurrent < 0 {
 		http.Error(w, "max_concurrent must be non-negative", http.StatusBadRequest)
+		return
+	}
+	if body.UpstreamTimeoutSeconds < 0 || body.UpstreamTimeoutSeconds > maxUpstreamTimeoutSeconds {
+		http.Error(w, "upstream_timeout_seconds must be between 0 and 3600", http.StatusBadRequest)
 		return
 	}
 	// Per-key upstream base URL override. Only meaningful for the OpenAI
@@ -287,19 +300,20 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	vk := &keys.VirtualKey{
-		ID:              id,
-		Token:           token,
-		Name:            name,
-		Upstream:        body.Upstream,
-		UpstreamKey:     body.UpstreamKey,
-		DailyBudgetUSD:  body.DailyBudgetUSD,
-		MonthBudgetUSD:  body.MonthBudgetUSD,
-		RPSLimit:        body.RPSLimit,
-		RPMLimit:        body.RPMLimit,
-		MaxConcurrent:   body.MaxConcurrent,
-		UpstreamBaseURL: canonicalBaseURL,
-		CreatedAt:       time.Now().UTC(),
-		ExpiresAt:       expiresAt,
+		ID:                     id,
+		Token:                  token,
+		Name:                   name,
+		Upstream:               body.Upstream,
+		UpstreamKey:            body.UpstreamKey,
+		DailyBudgetUSD:         body.DailyBudgetUSD,
+		MonthBudgetUSD:         body.MonthBudgetUSD,
+		RPSLimit:               body.RPSLimit,
+		RPMLimit:               body.RPMLimit,
+		MaxConcurrent:          body.MaxConcurrent,
+		UpstreamTimeoutSeconds: body.UpstreamTimeoutSeconds,
+		UpstreamBaseURL:        canonicalBaseURL,
+		CreatedAt:              time.Now().UTC(),
+		ExpiresAt:              expiresAt,
 	}
 	if err := s.keys.Create(r.Context(), vk); err != nil {
 		slog.Error("create virtual key", "err", err)
@@ -366,13 +380,14 @@ func (s *Server) handleUpdateKey(w http.ResponseWriter, r *http.Request) {
 
 	var body struct {
 		// Mutable fields. Nil means "leave unchanged".
-		Name            *string  `json:"name,omitempty"`
-		DailyBudgetUSD  *float64 `json:"daily_budget_usd,omitempty"`
-		MonthBudgetUSD  *float64 `json:"month_budget_usd,omitempty"`
-		RPSLimit        *int     `json:"rps_limit,omitempty"`
-		RPMLimit        *int     `json:"rpm_limit,omitempty"`
-		MaxConcurrent   *int     `json:"max_concurrent,omitempty"`
-		UpstreamBaseURL *string  `json:"upstream_base_url,omitempty"`
+		Name                   *string  `json:"name,omitempty"`
+		DailyBudgetUSD         *float64 `json:"daily_budget_usd,omitempty"`
+		MonthBudgetUSD         *float64 `json:"month_budget_usd,omitempty"`
+		RPSLimit               *int     `json:"rps_limit,omitempty"`
+		RPMLimit               *int     `json:"rpm_limit,omitempty"`
+		MaxConcurrent          *int     `json:"max_concurrent,omitempty"`
+		UpstreamTimeoutSeconds *int     `json:"upstream_timeout_seconds,omitempty"`
+		UpstreamBaseURL        *string  `json:"upstream_base_url,omitempty"`
 
 		// ExpiresAt is tri-state. Non-pointer json.RawMessage is used
 		// deliberately: *json.RawMessage collapses "absent" and "null"
@@ -433,6 +448,11 @@ func (s *Server) handleUpdateKey(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.MaxConcurrent != nil && *body.MaxConcurrent < 0 {
 		http.Error(w, "max_concurrent must be non-negative", http.StatusBadRequest)
+		return
+	}
+	if body.UpstreamTimeoutSeconds != nil &&
+		(*body.UpstreamTimeoutSeconds < 0 || *body.UpstreamTimeoutSeconds > maxUpstreamTimeoutSeconds) {
+		http.Error(w, "upstream_timeout_seconds must be between 0 and 3600", http.StatusBadRequest)
 		return
 	}
 
@@ -502,15 +522,16 @@ func (s *Server) handleUpdateKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	patch := keys.KeyPatch{
-		Name:            body.Name,
-		DailyBudgetUSD:  body.DailyBudgetUSD,
-		MonthBudgetUSD:  body.MonthBudgetUSD,
-		RPSLimit:        body.RPSLimit,
-		RPMLimit:        body.RPMLimit,
-		MaxConcurrent:   body.MaxConcurrent,
-		UpstreamBaseURL: canonicalBaseURL,
-		ExpiresAt:       expiresAtPtr,
-		ClearExpiresAt:  clearExpiresAt,
+		Name:                   body.Name,
+		DailyBudgetUSD:         body.DailyBudgetUSD,
+		MonthBudgetUSD:         body.MonthBudgetUSD,
+		RPSLimit:               body.RPSLimit,
+		RPMLimit:               body.RPMLimit,
+		MaxConcurrent:          body.MaxConcurrent,
+		UpstreamTimeoutSeconds: body.UpstreamTimeoutSeconds,
+		UpstreamBaseURL:        canonicalBaseURL,
+		ExpiresAt:              expiresAtPtr,
+		ClearExpiresAt:         clearExpiresAt,
 	}
 
 	updated, err := s.keys.Update(r.Context(), id, patch)

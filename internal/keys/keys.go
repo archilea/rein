@@ -57,8 +57,14 @@ type VirtualKey struct {
 	RPSLimit        int // requests per second; 0 means unlimited
 	RPMLimit        int // requests per minute; 0 means unlimited
 	MaxConcurrent   int // max concurrent in-flight requests; 0 means unlimited
-	CreatedAt       time.Time
-	RevokedAt       *time.Time
+	// UpstreamTimeoutSeconds is the optional per-request wall-clock ceiling
+	// applied to the outbound LLM call. 0 means unlimited; the proxy wraps
+	// the request context with context.WithTimeout only when this is > 0 so
+	// unlimited keys pay zero extra cost on the hot path. The admin API
+	// validates the value into [0, 3600].
+	UpstreamTimeoutSeconds int
+	CreatedAt              time.Time
+	RevokedAt              *time.Time
 	// ExpiresAt is the optional auto-revocation timestamp. Nil means no
 	// expiry. When set and the instant has passed, the proxy hot path
 	// rejects the key with a revocation-identical 401, and a background
@@ -90,15 +96,16 @@ func (k *VirtualKey) IsExpired(now time.Time) bool {
 // unchanged; ExpiresAt non-nil sets the new expiry; ClearExpiresAt=true
 // removes the expiry. Callers must not combine the two in one patch.
 type KeyPatch struct {
-	Name            *string
-	DailyBudgetUSD  *float64
-	MonthBudgetUSD  *float64
-	RPSLimit        *int
-	RPMLimit        *int
-	MaxConcurrent   *int
-	UpstreamBaseURL *string
-	ExpiresAt       *time.Time
-	ClearExpiresAt  bool
+	Name                   *string
+	DailyBudgetUSD         *float64
+	MonthBudgetUSD         *float64
+	RPSLimit               *int
+	RPMLimit               *int
+	MaxConcurrent          *int
+	UpstreamBaseURL        *string
+	UpstreamTimeoutSeconds *int
+	ExpiresAt              *time.Time
+	ClearExpiresAt         bool
 }
 
 // ApplyTo writes non-nil patch fields onto k. Callers are responsible
@@ -124,6 +131,9 @@ func (p KeyPatch) ApplyTo(k *VirtualKey) {
 	}
 	if p.UpstreamBaseURL != nil {
 		k.UpstreamBaseURL = *p.UpstreamBaseURL
+	}
+	if p.UpstreamTimeoutSeconds != nil {
+		k.UpstreamTimeoutSeconds = *p.UpstreamTimeoutSeconds
 	}
 	switch {
 	case p.ClearExpiresAt:

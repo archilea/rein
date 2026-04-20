@@ -22,20 +22,21 @@ type SQLite struct {
 
 const sqliteSchema = `
 CREATE TABLE IF NOT EXISTS virtual_keys (
-	id                 TEXT PRIMARY KEY,
-	token              TEXT NOT NULL UNIQUE,
-	name               TEXT NOT NULL,
-	upstream           TEXT NOT NULL,
-	upstream_key       TEXT NOT NULL,
-	daily_budget_usd   REAL NOT NULL DEFAULT 0,
-	month_budget_usd   REAL NOT NULL DEFAULT 0,
-	upstream_base_url  TEXT NOT NULL DEFAULT '',
-	rps_limit          INTEGER NOT NULL DEFAULT 0,
-	rpm_limit          INTEGER NOT NULL DEFAULT 0,
-	max_concurrent     INTEGER NOT NULL DEFAULT 0,
-	created_at         TEXT NOT NULL,
-	revoked_at         TEXT,
-	expires_at         TEXT
+	id                        TEXT PRIMARY KEY,
+	token                     TEXT NOT NULL UNIQUE,
+	name                      TEXT NOT NULL,
+	upstream                  TEXT NOT NULL,
+	upstream_key              TEXT NOT NULL,
+	daily_budget_usd          REAL NOT NULL DEFAULT 0,
+	month_budget_usd          REAL NOT NULL DEFAULT 0,
+	upstream_base_url         TEXT NOT NULL DEFAULT '',
+	rps_limit                 INTEGER NOT NULL DEFAULT 0,
+	rpm_limit                 INTEGER NOT NULL DEFAULT 0,
+	max_concurrent            INTEGER NOT NULL DEFAULT 0,
+	upstream_timeout_seconds  INTEGER NOT NULL DEFAULT 0,
+	created_at                TEXT NOT NULL,
+	revoked_at                TEXT,
+	expires_at                TEXT
 );`
 
 // NewSQLite opens (or creates) a SQLite database at path and applies the schema.
@@ -95,6 +96,7 @@ func applySQLiteMigrations(db *sql.DB) error {
 		{"rps_limit", `ALTER TABLE virtual_keys ADD COLUMN rps_limit INTEGER NOT NULL DEFAULT 0`},
 		{"rpm_limit", `ALTER TABLE virtual_keys ADD COLUMN rpm_limit INTEGER NOT NULL DEFAULT 0`},
 		{"max_concurrent", `ALTER TABLE virtual_keys ADD COLUMN max_concurrent INTEGER NOT NULL DEFAULT 0`},
+		{"upstream_timeout_seconds", `ALTER TABLE virtual_keys ADD COLUMN upstream_timeout_seconds INTEGER NOT NULL DEFAULT 0`},
 		{"expires_at", `ALTER TABLE virtual_keys ADD COLUMN expires_at TEXT`},
 	} {
 		has, err := sqliteColumnExists(db, "virtual_keys", col.name)
@@ -187,11 +189,11 @@ func (s *SQLite) Create(ctx context.Context, k *VirtualKey) error {
 		expiresAtCol = k.ExpiresAt.UTC().Format(time.RFC3339Nano)
 	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO virtual_keys (id, token, name, upstream, upstream_key, daily_budget_usd, month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent, created_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO virtual_keys (id, token, name, upstream, upstream_key, daily_budget_usd, month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent, upstream_timeout_seconds, created_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		k.ID, k.Token, k.Name, k.Upstream, encUpstream,
 		k.DailyBudgetUSD, k.MonthBudgetUSD, k.UpstreamBaseURL,
-		k.RPSLimit, k.RPMLimit, k.MaxConcurrent,
+		k.RPSLimit, k.RPMLimit, k.MaxConcurrent, k.UpstreamTimeoutSeconds,
 		k.CreatedAt.UTC().Format(time.RFC3339Nano),
 		expiresAtCol)
 	if err != nil {
@@ -218,11 +220,13 @@ func (s *SQLite) queryOne(ctx context.Context, column, value string) (*VirtualKe
 	switch column {
 	case "id":
 		q = `SELECT id, token, name, upstream, upstream_key, daily_budget_usd,
-			month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent, created_at, revoked_at, expires_at
+			month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent,
+			upstream_timeout_seconds, created_at, revoked_at, expires_at
 			FROM virtual_keys WHERE id = ?`
 	case "token":
 		q = `SELECT id, token, name, upstream, upstream_key, daily_budget_usd,
-			month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent, created_at, revoked_at, expires_at
+			month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent,
+			upstream_timeout_seconds, created_at, revoked_at, expires_at
 			FROM virtual_keys WHERE token = ?`
 	default:
 		return nil, fmt.Errorf("queryOne: unsupported lookup column %q", column)
@@ -235,7 +239,8 @@ func (s *SQLite) queryOne(ctx context.Context, column, value string) (*VirtualKe
 func (s *SQLite) List(ctx context.Context) ([]*VirtualKey, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, token, name, upstream, upstream_key, daily_budget_usd,
-		       month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent, created_at, revoked_at, expires_at
+		       month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent,
+		       upstream_timeout_seconds, created_at, revoked_at, expires_at
 		FROM virtual_keys ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("query keys: %w", err)
@@ -298,10 +303,12 @@ func (s *SQLite) Update(ctx context.Context, id string, patch KeyPatch) (*Virtua
 		UPDATE virtual_keys SET
 			name = ?, daily_budget_usd = ?, month_budget_usd = ?,
 			upstream_base_url = ?, rps_limit = ?, rpm_limit = ?, max_concurrent = ?,
+			upstream_timeout_seconds = ?,
 			expires_at = ?
 		WHERE id = ? AND revoked_at IS NULL`,
 		current.Name, current.DailyBudgetUSD, current.MonthBudgetUSD,
 		current.UpstreamBaseURL, current.RPSLimit, current.RPMLimit, current.MaxConcurrent,
+		current.UpstreamTimeoutSeconds,
 		expiresAtCol,
 		id)
 	if err != nil {
@@ -346,7 +353,8 @@ func (s *SQLite) RevokeAt(ctx context.Context, id string, at time.Time) error {
 func (s *SQLite) ListExpiring(ctx context.Context, asOf time.Time) ([]*VirtualKey, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, token, name, upstream, upstream_key, daily_budget_usd,
-		       month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent, created_at, revoked_at, expires_at
+		       month_budget_usd, upstream_base_url, rps_limit, rpm_limit, max_concurrent,
+		       upstream_timeout_seconds, created_at, revoked_at, expires_at
 		FROM virtual_keys
 		WHERE expires_at IS NOT NULL AND expires_at <= ? AND revoked_at IS NULL
 		ORDER BY expires_at ASC`,
@@ -381,7 +389,7 @@ func (s *SQLite) scanKey(scan func(dest ...any) error) (*VirtualKey, error) {
 	)
 	err := scan(&k.ID, &k.Token, &k.Name, &k.Upstream, &encUpstream,
 		&k.DailyBudgetUSD, &k.MonthBudgetUSD, &k.UpstreamBaseURL,
-		&k.RPSLimit, &k.RPMLimit, &k.MaxConcurrent,
+		&k.RPSLimit, &k.RPMLimit, &k.MaxConcurrent, &k.UpstreamTimeoutSeconds,
 		&createdAt, &revokedAt, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
