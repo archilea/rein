@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -87,8 +88,14 @@ type Config struct {
 // Load reads configuration from environment variables.
 // It returns an error if any required variable is missing or malformed.
 func Load() (*Config, error) {
+	rawPort := getenv("REIN_PORT", "8080")
+	portNum, err := strconv.Atoi(rawPort)
+	if err != nil || portNum < 1 || portNum > 65535 {
+		return nil, fmt.Errorf("invalid REIN_PORT %q: must be an integer between 1 and 65535", rawPort)
+	}
+
 	cfg := &Config{
-		Port:          getenv("REIN_PORT", "8080"),
+		Port:          rawPort,
 		AdminToken:    os.Getenv("REIN_ADMIN_TOKEN"),
 		DatabaseURL:   getenv("REIN_DB_URL", "sqlite:./rein.db"),
 		EncryptionKey: os.Getenv("REIN_ENCRYPTION_KEY"),
